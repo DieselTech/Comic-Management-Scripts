@@ -1,7 +1,7 @@
 """
 Author: DieselTech
 URL: https://github.com/DieselTech/Kavita-API-Scripts
-Date created: April 28, 2023, 2:30 PM
+Date created: May 5, 2023, 16:00
 
 Description:
 This will queue up all the libraries on your kavita install to scan. Since a general "Scan all libraries" doesn't exist within the server, this will tell it to scan each library one by one. If you have a lot of libraries added
@@ -11,40 +11,61 @@ Software requirements:
 - Python 3 or later
 - requests
 - json
+- urlparse
 
 Usage:
 python scan_all_libraries.py
 """
 
+import os
 import requests
-import json
+from urllib.parse import urlparse
 
-url = "http://192.168.0.xxx:5000/api/Library" # Change with your own instances URL
-scan_url = "http://192.168.0.xxx:5000/api/Library/scan" # Same as above, but leave the API endpoint 
-jwt_token = "YOUR_JWT_TOKEN_HERE"
-
-# Get your own JWT token by going to dev tools in your web browser, opening up the 'Storage' tab and then go to local storage. The token can be tricky to copy and paste since it's crazy long. Use a text editior with wordwrap. 
+path = "M:\comics"  # Replace with the path to your comics || This is for if your running the script on a different machine than your kavita host. 
+exclude_list = ["Marvel", "DC Comics", "Image"]  # Replace with your publisher names to exclude. Thsese are generally the biggest folders in the library and will take a long time to scan. 
 
 # Do NOT change anything below this line
+
+url = input("Paste in your full ODPS URL from your Kavita user dashboard (/preferences#clients): ")
+
+parsed_url = urlparse(url)
+
+host_address = parsed_url.scheme + "://" + parsed_url.netloc
+api_key = parsed_url.path.split('/')[-1]
+
+print("Host Address:", host_address)
+print("API Key:", api_key)
+
+login_endpoint = "/api/Plugin/authenticate"
+library_endpoint = "/api/Library/create"
+
+try:
+    apikeylogin = requests.post(host_address + login_endpoint + "?apiKey=" + api_key + "&pluginName=pythonFolderCreateScript")
+    apikeylogin.raise_for_status() # check if the response code indicates an error
+    jwt_token = apikeylogin.json()['token']
+#    print("JWT Token:", jwt_token) # Only for debug 
+except requests.exceptions.RequestException as e:
+    print("Error during authentication:", e)
+    exit()
 
 headers = {
     "Authorization": f"Bearer {jwt_token}",
     "Content-Type": "application/json"
 }
 
-response = requests.get(url, headers=headers) # First, get the list of every library that is registered on your system.  
+# Line 25 where 'os.path.join' is for accounting for dockers inside container paths. It will put /comics in front of the folder name outputted by the path
 
-if response.status_code == 200: # As long as the first API call to get all the data is successful
-    data = response.json()      # Store the reults as 'data'
-    for item in data:           
-        id = item["id"]
+for entry in os.scandir(path):
+    if entry.is_dir() and entry.name not in exclude_list:
+        full_path = os.path.join('/comics/', entry.name)
         payload = {
-            "id": id,
-        }
-        scan_response = requests.post(scan_url, headers=headers, json=payload) # Submit results to the scan API URL as defined at the top
-        if scan_response.status_code == 200:
-            print(f"Successfully scanned / queued library number {id}") # 
-        else:
-            print(f"Failed to scan library item {id}")
-else:
-    print("Error: Failed to retrieve data from the API.")
+            "name": entry.name,
+            "type": 1, # 0 = manga, 1 = comics, 2 = books
+            "folders": [full_path]
+         }
+        try:
+            response = requests.post(host_address + library_endpoint, headers=headers, json=payload)
+            response.raise_for_status() # check if the response code indicates an error
+            print(f"Folder '{entry.name}' sent. Response: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"Error creating library for folder '{entry.name}':", e)
