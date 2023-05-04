@@ -1,0 +1,55 @@
+"""
+Author: DieselTech
+URL: https://github.com/DieselTech/Kavita-API-Scripts
+Date created: May 3, 2023, 21:30 PM
+
+Description:
+This will queue up all the libraries on your kavita install to scan. This method only exists in nightly branch 7.1.45 or higher. 
+
+Software requirements:
+- Python 3 or later
+- requests
+- json
+
+Usage:
+python scan_all_libraries_API.py
+"""
+import requests
+import json
+from urllib.parse import urlparse
+
+url = input("Paste in your full ODPS URL from your Kavita user dashboard (/preferences#clients): ")
+
+parsed_url = urlparse(url)
+
+host_address = parsed_url.scheme + "://" + parsed_url.netloc
+api_key = parsed_url.path.split('/')[-1]
+
+print("Host Address:", host_address)
+print("API Key:", api_key)
+
+login_endpoint = "/api/Plugin/authenticate"
+scan_endpoint = "/api/Library/scan-all"
+try:
+    apikeylogin = requests.post(host_address + login_endpoint + "?apiKey=" + api_key + "&pluginName=pythonScanScript")
+    apikeylogin.raise_for_status() # check if the response code indicates an error
+    jwt_token = apikeylogin.json()['token']
+#    print("JWT Token:", jwt_token) # Only for debug 
+except requests.exceptions.RequestException as e:
+    print("Error during authentication:", e)
+    exit()
+
+headers = {
+    "Authorization": f"Bearer {jwt_token}",
+    "Content-Type": "application/json"
+}
+response = requests.post(host_address + scan_endpoint, headers=headers)
+
+if response.status_code == 200: # As long as the first API call to get all the data is successful
+        if scan_response.status_code == 200:
+            print(f"Successfully scanned / queued library") # 
+        else:
+            print(f"Failed to scan library")
+            print(scan_response)
+else:
+    print("Error: Failed to retrieve data from the API.")
