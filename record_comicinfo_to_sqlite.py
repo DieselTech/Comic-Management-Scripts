@@ -17,6 +17,7 @@ def extract_comic_info_from_zip(zip_ref, zip_info):
         title = root.findtext('Title', default='')
         series = root.findtext('Series', default='')
         number = root.findtext('Number', default='')
+        volume = root.findtext('Volume', default='')
         summary = root.findtext('Summary', default='')
         writer = root.findtext('Writer', default='')
         penciller = root.findtext('Penciller', default='')
@@ -27,6 +28,7 @@ def extract_comic_info_from_zip(zip_ref, zip_info):
         editor = root.findtext('Editor', default='')
         publisher = root.findtext('Publisher', default='')
         imprint = root.findtext('Imprint', default='')
+        web = root.findtext('Web', default='')
         genre = root.findtext('Genre', default='')
         page_count = root.findtext('PageCount', default='')
         language_iso = root.findtext('LanguageISO', default='')
@@ -38,6 +40,7 @@ def extract_comic_info_from_zip(zip_ref, zip_info):
             'Title': title,
             'Series': series,
             'Number': number,
+            'Volume': volume,
             'Summary': summary,
             'Writer': writer,
             'Penciller': penciller,
@@ -48,6 +51,7 @@ def extract_comic_info_from_zip(zip_ref, zip_info):
             'Editor': editor,
             'Publisher': publisher,
             'Imprint': imprint,
+            'Web': web,
             'Genre': genre,
             'PageCount': page_count,
             'LanguageISO': language_iso,
@@ -62,31 +66,37 @@ def process_zip_files(directory, database):
 
     # Creating the table if it doesn't exist
     c.execute('''CREATE TABLE IF NOT EXISTS comics
-                 (id INTEGER PRIMARY KEY, filename TEXT, path TEXT, title TEXT, series TEXT, number TEXT, summary TEXT, 
+                 (id INTEGER PRIMARY KEY, filename TEXT, path TEXT, title TEXT, series TEXT, number TEXT, volume TEXT, summary TEXT, 
                  writer TEXT, penciller TEXT, inker TEXT, colorist TEXT, letterer TEXT, cover_artist TEXT, editor TEXT, 
-                 publisher TEXT, imprint TEXT, genre TEXT, page_count TEXT, language_iso TEXT, format TEXT, age_rating TEXT)''')
+                 publisher TEXT, imprint TEXT, web TEXT, genre TEXT, page_count TEXT, language_iso TEXT, format TEXT, age_rating TEXT, last_modified INTEGER)''')
+    
+    conn.execute("PRAGMA journal_mode = WAL;")  # Enable WAL mode
 
-    # Finding zip files using glob
+
     zip_files = glob.glob(os.path.join(directory, '**/*.cbz'), recursive=True)
 
-    # Iterating through zip files
-    for zip_file in tqdm(zip_files, desc="Processing Comic files", unit="file"):
+    # Iterating through cbz files
+    for zip_file in tqdm(zip_files, desc="Processing ZIP files", unit="file"):
         try:
             with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                last_modified = os.path.getmtime(zip_file)
+                c.execute("SELECT last_modified FROM comics WHERE filename=?", (os.path.basename(zip_file),))
+                result = c.fetchone()
+                if result and result[0] >= last_modified:
+                    continue  # Skip if the file hasn't been modified
                 for zip_info in zip_ref.infolist():
                     if zip_info.filename.lower() == 'comicinfo.xml':
                         comic_info = extract_comic_info_from_zip(zip_ref, zip_info.filename)
-                        # Inserting into database
-                        c.execute('''INSERT INTO comics (filename, path, title, series, number, summary, writer, penciller, inker,
-                                     colorist, letterer, cover_artist, editor, publisher, imprint, genre, page_count,
-                                     language_iso, format, age_rating) 
-                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        c.execute('''INSERT INTO comics (filename, path, title, series, number, volume, summary, writer, penciller, inker,
+                                     colorist, letterer, cover_artist, editor, publisher, imprint, web, genre, page_count,
+                                     language_iso, format, age_rating, last_modified) 
+                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                                   (os.path.basename(zip_file), os.path.dirname(zip_file), comic_info['Title'], comic_info['Series'], comic_info['Number'],
-                                   comic_info['Summary'], comic_info['Writer'], comic_info['Penciller'],
+                                   comic_info['Volume'], comic_info['Summary'], comic_info['Writer'], comic_info['Penciller'],
                                    comic_info['Inker'], comic_info['Colorist'], comic_info['Letterer'],
                                    comic_info['CoverArtist'], comic_info['Editor'], comic_info['Publisher'],
-                                   comic_info['Imprint'], comic_info['Genre'], comic_info['PageCount'],
-                                   comic_info['LanguageISO'], comic_info['Format'], comic_info['AgeRating']))
+                                   comic_info['Imprint'], comic_info['Web'], comic_info['Genre'], comic_info['PageCount'],
+                                   comic_info['LanguageISO'], comic_info['Format'], comic_info['AgeRating'], last_modified))
                         conn.commit()
         except Exception as e:
             print(f"Error processing {zip_file}: {e}")
