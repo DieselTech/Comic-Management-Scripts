@@ -17,6 +17,7 @@ def extract_comic_info_from_zip(zip_ref, zip_info):
         title = root.findtext('Title', default='')
         series = root.findtext('Series', default='')
         number = root.findtext('Number', default='')
+        volume = root.findtext('Volume', default='')
         summary = root.findtext('Summary', default='')
         writer = root.findtext('Writer', default='')
         penciller = root.findtext('Penciller', default='')
@@ -38,6 +39,7 @@ def extract_comic_info_from_zip(zip_ref, zip_info):
             'Title': title,
             'Series': series,
             'Number': number,
+            'Volume': volume,
             'Summary': summary,
             'Writer': writer,
             'Penciller': penciller,
@@ -62,7 +64,7 @@ def process_zip_files(directory, database):
 
     # Creating the table if it doesn't exist
     c.execute('''CREATE TABLE IF NOT EXISTS comics
-                 (id INTEGER PRIMARY KEY, filename TEXT, path TEXT, title TEXT, series TEXT, number TEXT, summary TEXT, 
+                 (id INTEGER PRIMARY KEY, filename TEXT, path TEXT, title TEXT, series TEXT, number TEXT, volume TEXT, summary TEXT, 
                  writer TEXT, penciller TEXT, inker TEXT, colorist TEXT, letterer TEXT, cover_artist TEXT, editor TEXT, 
                  publisher TEXT, imprint TEXT, genre TEXT, page_count TEXT, language_iso TEXT, format TEXT, age_rating TEXT)''')
 
@@ -77,11 +79,11 @@ def process_zip_files(directory, database):
                     if zip_info.filename.lower() == 'comicinfo.xml':
                         comic_info = extract_comic_info_from_zip(zip_ref, zip_info.filename)
                         # Inserting into database
-                        c.execute('''INSERT INTO comics (filename, path, title, series, number, summary, writer, penciller, inker,
+                        c.execute('''INSERT INTO comics (filename, path, title, series, number, volume, summary, writer, penciller, inker,
                                      colorist, letterer, cover_artist, editor, publisher, imprint, genre, page_count,
                                      language_iso, format, age_rating) 
-                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                                  (os.path.basename(zip_file), os.path.dirname(zip_file), comic_info['Title'], comic_info['Series'], comic_info['Number'],
+                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                  (os.path.basename(zip_file), os.path.dirname(zip_file), comic_info['Title'], comic_info['Series'], comic_info['Number'],comic_info['Volume'],
                                    comic_info['Summary'], comic_info['Writer'], comic_info['Penciller'],
                                    comic_info['Inker'], comic_info['Colorist'], comic_info['Letterer'],
                                    comic_info['CoverArtist'], comic_info['Editor'], comic_info['Publisher'],
@@ -94,6 +96,6 @@ def process_zip_files(directory, database):
     conn.close()
 
 # Example usage
-directory = '/Comics'
-database = 'comics_database.db'
+directory = '/home/christian/localstorage/comics'
+database = 'comics_database_test.db'
 process_zip_files(directory, database)
