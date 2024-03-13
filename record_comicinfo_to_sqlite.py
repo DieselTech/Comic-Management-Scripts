@@ -59,24 +59,29 @@ def extract_comic_info_from_zip(zip_ref, zip_info):
             'AgeRating': age_rating
         }
 
-# Function to process zip files and record information in SQLite database
-def process_zip_files(directory, database):
-    conn = sqlite3.connect(database)
+def create_comics_table(conn):
     c = conn.cursor()
-
-    # Creating the table if it doesn't exist
     c.execute('''CREATE TABLE IF NOT EXISTS comics
                  (id INTEGER PRIMARY KEY, filename TEXT, path TEXT, title TEXT, series TEXT, number TEXT, volume TEXT, summary TEXT, 
                  writer TEXT, penciller TEXT, inker TEXT, colorist TEXT, letterer TEXT, cover_artist TEXT, editor TEXT, 
-                 publisher TEXT, imprint TEXT, web TEXT, genre TEXT, page_count TEXT, language_iso TEXT, format TEXT, age_rating TEXT, last_modified INTEGER)''')
+                 publisher TEXT, imprint TEXT, web TEXT, genre TEXT, page_count TEXT, language_iso TEXT, format TEXT, age_rating TEXT,
+                 last_modified INTEGER)''')
     
     conn.execute("PRAGMA journal_mode = WAL;")  # Enable WAL mode
+    
+    conn.commit()
 
-
+# Function to process zip files and record information in SQLite database
+def process_zip_files(directory, database):
+    conn = sqlite3.connect(database)
+    create_comics_table(conn)
+    
+    c = conn.cursor()
+    
     zip_files = glob.glob(os.path.join(directory, '**/*.cbz'), recursive=True)
 
     # Iterating through cbz files
-    for zip_file in tqdm(zip_files, desc="Processing ZIP files", unit="file"):
+    for zip_file in tqdm(zip_files, desc="Processing CBZ files", unit="file"):
         try:
             with zipfile.ZipFile(zip_file, 'r') as zip_ref:
                 last_modified = os.path.getmtime(zip_file)
@@ -104,6 +109,6 @@ def process_zip_files(directory, database):
     conn.close()
 
 # Example usage
-directory = '/Comics'
+directory = '/volume1/media/comics'
 database = 'comics_database.db'
 process_zip_files(directory, database)
