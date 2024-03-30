@@ -1,10 +1,11 @@
 """
 Author: DieselTech
-URL: https://github.com/DieselTech/Kavita-API-Scripts
+URL: https://github.com/DieselTech/Comic-Management-Scripts
 Date created: May 5, 2023, 21:30 PM
+Updated: March 30, 19:00
 
 Description:
-This will queue up all the libraries on your kavita install to scan. S If you have a lot of libraries added this can take some time. According to the server logs there could also be a 3 hour delay before a scan starts. 
+This will queue up all the libraries on your kavita install to scan. If you have a lot of libraries added this can take some time. According to the server logs there could also be a 3 hour delay before a scan starts. 
 
 Software requirements:
 - Python 3 or later
@@ -29,7 +30,7 @@ print("Host Address:", host_address)
 print("API Key:", api_key)
 
 login_endpoint = "/api/Plugin/authenticate"
-library_endpoint = "/api/Library"
+library_endpoint = "/api/Library/libraries"
 scan_endpoint = "/api/Library/scan"
 try:
     apikeylogin = requests.post(host_address + login_endpoint + "?apiKey=" + api_key + "&pluginName=pythonScanScript")
@@ -52,9 +53,8 @@ if response.status_code == 200: # As long as the first API call to get all the d
         id = item["id"]
         scan_response = requests.post(host_address + scan_endpoint + "?libraryId=" + str(id), headers=headers) # Submit results to the scan API
         if scan_response.status_code == 200:
-            print(f"Successfully scanned / queued library number {id}") # 
+            print(f"Successfully scanned / queued library number {id}")
         else:
             print(f"Failed to scan library item {id}")
-            print(scan_response)
 else:
     print("Error: Failed to retrieve data from the API.")
