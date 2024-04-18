@@ -11,7 +11,7 @@ Software requirements:
 - Python 3
 
 Usage:
-python .py
+python find_junk_in_cbz.py.py
 """
 
 import os
