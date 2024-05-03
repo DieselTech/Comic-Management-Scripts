@@ -1,3 +1,7 @@
+"""
+This was put here in a known broken state. It was mainly uploaded at the request of a few people so they had something to work off. In due time I'll come back to this...
+
+"""
 import requests
 import csv
 import os
