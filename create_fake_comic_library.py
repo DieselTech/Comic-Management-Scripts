@@ -1,3 +1,20 @@
+"""
+Author: DieselTech
+URL: https://github.com/DieselTech/Comic-Management-Scripts
+Date created: May 3, 2024, 15:30 PM
+
+Description: This will create folders and cbz files to simulate a comic book library. Creates a folder
+for each entry in `publishers` and a sub-folder using a random entry in `prefixes`. Each sub-folder will contain a cbz file
+with a random name from `base_filenames` that has the single image that is defined in `image_file`.
+
+Software requirements:
+- Python 3
+- zipfile
+
+Usage:
+python create_fake_comic_library.py
+"""
+
 import os
 import random
 import zipfile
