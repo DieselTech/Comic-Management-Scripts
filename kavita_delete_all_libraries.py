@@ -27,10 +27,12 @@ python kavita_delete_all_libraries.py
 
 """
 
-import requests
-from urllib.parse import urlparse
-import time
 import random
+import time
+from urllib.parse import urlparse
+
+import requests
+
 
 def authenticate(url):
     parsed_url = urlparse(url)
@@ -82,9 +84,8 @@ def delete_all_libraries(jwt_token, host_address):
         if response.status_code != 200:
             print("Error: Failed to delete data from API.")
         else:
-            print(f"Library '{library_id}' deleted. Response: {response.status_code} - Sleeping 400ms before next "
-                  f"delete.")
-            time.sleep(0.4)
+            print(f"Library '{library_id}' deleted. Response: {response.status_code} - Sleeping before next launch")
+            time.sleep(0.55)
     return
 
 
@@ -94,8 +95,8 @@ def main():
         really_sure = input("Are you really sure? (yup/nope): ")
         if really_sure.lower() == "yup":
             print("Take a few seconds to think about it before dropping to DEFCON 1")
-            time.sleep(random.randint(5, 10))
-            url = input("Enter the OPDS URL you want to nuke the libraries from: ")
+            time.sleep(random.randint(3, 8))
+            url = input("Enter the full OPDS URL you want to nuke the libraries from: ")
             jwt_token, host_address = authenticate(url)
             get_all_libraries(jwt_token, host_address)
             delete_all_libraries(jwt_token, host_address)
