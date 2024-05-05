@@ -82,18 +82,20 @@ def delete_all_libraries(jwt_token, host_address):
         if response.status_code != 200:
             print("Error: Failed to delete data from API.")
         else:
-            print(f"Library '{library_id}' deleted. Response: {response.status_code}")
+            print(f"Library '{library_id}' deleted. Response: {response.status_code} - Sleeping 400ms before next "
+                  f"delete.")
+            time.sleep(0.4)
     return
 
 
 def main():
     sure = input("Are you sure you want to delete all libraries? (yes/no): ")
     if sure.lower() == "yes":
-        really_sure = input("Are you really sure? (yes/no): ")
-        if really_sure.lower() == "yes":
+        really_sure = input("Are you really sure? (yup/nope): ")
+        if really_sure.lower() == "yup":
             print("Take a few seconds to think about it before dropping to DEFCON 1")
             time.sleep(random.randint(5, 10))
-            url = input("Enter the server URL you want to nuke the libraries from: ")
+            url = input("Enter the OPDS URL you want to nuke the libraries from: ")
             jwt_token, host_address = authenticate(url)
             get_all_libraries(jwt_token, host_address)
             delete_all_libraries(jwt_token, host_address)
