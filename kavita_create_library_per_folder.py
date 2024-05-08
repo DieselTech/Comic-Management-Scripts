@@ -198,7 +198,7 @@ def main():
                 else:
                     break
         else:
-            args.exclude = None
+            args.exclude = []
 
     if args.url is None:
         args.url = input("Paste in your full ODPS URL from your Kavita user dashboard (/preferences#clients): ")
