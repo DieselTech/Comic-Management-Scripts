@@ -30,6 +30,8 @@ from urllib.parse import urlparse
 import os
 import time
 
+global_ignore_folders = [".zzz_check", "@eaDir", "@Recycle", "#recycle"]
+
 
 def authenticate(url):
     parsed_url = urlparse(url)
@@ -65,9 +67,13 @@ def submit_folders(jwt_token, host_address, path, exclude_list, library_type, do
         "Authorization": f"Bearer {jwt_token}",
         "Content-Type": "application/json"
     }
+
     for entry in os.scandir(path):
         if entry.is_dir():
-            if entry.name.lower() in [name.lower() for name in exclude_list]:
+            if entry.name.lower() in global_ignore_folders:
+                print(f"Skipping folder '{entry.name}' due to global exclusion.")
+                continue
+            if exclude_list is not None and entry.name.lower() in [name.lower() for name in exclude_list]:
                 print(f"Skipping folder '{entry.name}' due to exclusion.")
                 continue
         if docker_modifier is None and entry.name not in exclude_list:
@@ -127,17 +133,17 @@ def main():
 
     parser.add_argument('-u', '--url', type=str, required=False, help='Full ODPS URL from your Kavita user dashboard ('
                                                                       '/preferences#clients)')
-    
+
     parser.add_argument('-p', '--path', type=str, required=False, help='Path to your folders')
-    
+
     parser.add_argument('-lt', '--library-type', type=int, required=False, choices=range(0, 5),
                         help='What type of library is this? 0 = Manga, 1 = Comics, 2 = Books (epubs), 3 = Loose '
                              'Images, 4 = Light Novels, 5 = Comics(ComicVine)')
-    
+
     parser.add_argument('-d', '--docker-modifier', type=str, required=False, help='Modifier to correct the path to '
                                                                                   'the comics folder within the '
                                                                                   'docker container.')
-    
+
     parser.add_argument('-e', '--exclude', nargs='+', default=[], help='Publisher names to exclude')
 
     args = parser.parse_args()
