@@ -1,10 +1,7 @@
 # Comic-Mangement-Scripts
-Various small scripts made to make managing a large comic library easier. 
-
-Has a little bit of everything. 
 
 
-Small break down of the scripts - 
+Break down of the scripts - 
 
 create_fake_comic_library.py - This will create folders and cbz files with some random names to simulate a comic book library. Inserts a single image (that you define) so that it's a valid cbz file. 
 
@@ -23,4 +20,3 @@ record_comicinfo_to_sqlite.py - Reads your cbz collection and records the conten
 scan_all_endpoints_API.py - For kavita to start a scan on every library in your server. 
 
 scan_all_libraries.py - For Kavita, but was made before the "scan-all" endpoint was made. This gets the list of your libraries on the server and sends the scan command to them 1 by 1. 
-
