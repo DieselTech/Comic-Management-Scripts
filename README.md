@@ -1,5 +1,8 @@
 # Comic-Mangement-Scripts
 
+
+# Library Management 
+
 create_fake_comic_library.py - This will create folders and cbz files with some random names to simulate a comic book library. Inserts a single image (that you define) so that it's a valid cbz file. 
 
 find_junk_in_cbz.py - Scans a path the user supplies for cbz files and records how many "junk" files are inside. Junk files are considered anything not an image or .xml metadata. Stores results in non_image_files.log
@@ -10,7 +13,7 @@ record_comicinfo_to_sqlite.py - Reads your cbz collection and records the conten
 
 
 
-# Kavita Specific scripts 
+# Kavita Specific files 
 
 scan_all_endpoints_API.py - For kavita to start a scan on every library in your server. 
 
