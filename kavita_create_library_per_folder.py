@@ -50,14 +50,9 @@ def authenticate(url):
         exit()
 
 
-def get_docker_path(win_path, docker_path):
-    win_path_parts = win_path.split('\\')
-
-    publisher_folder = win_path_parts[-1]
-
+def get_docker_path(local_path, docker_path):
+    publisher_folder = os.path.split(local_path)[-1]
     docker_path = os.path.join(docker_path, publisher_folder)
-    docker_path = docker_path.replace('\\', '/')
-
     return docker_path
 
 
@@ -136,7 +131,7 @@ def main():
 
     parser.add_argument('-p', '--path', type=str, required=False, help='Path to your folders')
 
-    parser.add_argument('-lt', '--library-type', type=int, required=False, choices=range(0, 5),
+    parser.add_argument('-lt', '--library-type', type=int, required=False, choices=range(0, 6),
                         help='What type of library is this? 0 = Manga, 1 = Comics, 2 = Books (epubs), 3 = Loose '
                              'Images, 4 = Light Novels, 5 = Comics(ComicVine)')
 
