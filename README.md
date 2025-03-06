@@ -11,6 +11,12 @@ mimic_files_and_folder_strcuture.py - Will look at a folder on disk and mimic it
 
 record_comicinfo_to_sqlite.py - Reads your cbz collection and records the contents of `comicinfo.xml` into a sqlite database. This is useful for quickly searching against your collection of metadata to see what might need to be fixed or updated. Records last time of scan and only scans files that have changed in order to be more efficient. 
 
+Manga_Download_Processor.py - Takes a folder you have with raw download files and tries to determine the series name, volume/chapter number and then converts the images to webp format. Moves the converted folder to your library folder with the cleaned up file naming. 
+Todo:
+  - Instead of just moving the file to the final library based on the series name, enumerate the folders in the final library and pick the one that seems like it is the closest match. That way small differences in naming don't interfear with movin the final file.
+  - Test more regex patterns to cover different naming conventions. I have a good number of the most common use cases already figured out.
+  - Change the way the (F) system works. Fixed files could have numbers in them like `(F3)` in cases where there might of been a lot of re-releases. Need to account for (F#) 
+
 
 
 # Kavita Specific files 
