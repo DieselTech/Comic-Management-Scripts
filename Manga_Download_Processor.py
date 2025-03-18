@@ -1,18 +1,103 @@
 """
-Manga Download Processor
-This script processes downloaded manga files, converting images to WebP format and moving them to a library directory.
-Creation Date: 2025-03-05 18:20
-Update Date: 2025-03-17 22:22
+Manga Unpacker and Library Manager
+=================================
 
-Author: DieselTech
+A tool for organizing and processing manga/comic files by automatically detecting series names, 
+chapter numbers, and volume information from filenames. This script can extract compressed files, 
+convert images to WebP format for space savings, and organize files into a structured library.
 
+Did I break it?:
+--------------
+
+If something isn't working correctly or you are getting bad matches, let me know by opening an issue.
+Helping improve the regex patterns will help everyone in down the line. Also, I know a lot of this code
+is crap. Especially the part around processing directories. I'll get around to making it better at some point.
+
+
+Requirements:
+------------
+- Python 3.6+
+- Dependencies: PIL (Pillow), tqdm, unrar (external command-line tool)
+  Install with: pip install Pillow tqdm
+
+- The unrar command-line tool must be installed separately:
+  • Windows: Download from https://www.rarlab.com/rar_add.htm
+  • Linux: sudo apt install unrar (Ubuntu/Debian) or sudo dnf install unrar (Fedora)
+  • macOS: brew install unrar (using Homebrew)
+  
+Usage:
+-----
+python Manga_Download_Processor.py [options]
+
+Arguments:
+---------
+  --dry-run, -d       Test pattern matching without moving files
+  --test, -t          Run pattern tests on sample filenames
+  --auto, -a          Run in automatic mode without user prompts (for scheduled jobs)
+  --source, -s DIR    Source directory with raw downloads to process
+  --dest, -l DIR      Destination library path for processed files
+  
+Examples:
+--------
+# Interactive mode (prompted for paths):
+python Manga_Download_Processor.py
+
+# Dry run to preview what would happen:
+python Manga_Download_Processor.py --dry-run --source /path/to/downloads --dest /path/to/library
+
+# Test pattern matching on specific filenames:
+python Manga_Download_Processor.py --test "My Series c10 (2023).cbz" "Another Example v02 (2022).cbz"
+
+# Fully automated mode for scheduled jobs:
+python Manga_Download_Processor.py --auto --source /path/to/downloads --dest /path/to/library
+
+# Combine automatic mode with dry run for testing:
+python Manga_Download_Processor.py --auto --dry-run --source /path/to/downloads --dest /path/to/library
+
+Pattern Matching System:
+----------------------
+The script uses regex patterns to detect series names, chapter numbers, and volume information
+from filenames. A weighted scoring system ranks potential matches with these criteria:
+
+- Series name and title are most important (10 points)
+- Chapter numbers are next (8 points)
+- Volume numbers are valued (6 points)
+- Additional info like year and extras are also considered
+
+Quality checks are applied to penalize unrealistic matches like:
+- Series names ending with "Chapter" or separators
+- Unrealistic chapter numbers
+- Missing essential components
+
+Library Organization:
+------------------
+Files will be organized into their own series folder based on the series name that is parsed out.
+If a volume number or chapter number is found, this info will be added to the filename. 
+
+For example the filename "My Series c10 (2023).cbz" would get sorted to:
+
+/library_path/
+  /My Series/
+    My Series - Chapter 10.cbz
+
+Automation:
+---------
+When ran in automatic mode the first match will be chosen because human input isn't possible.
+You should test the script out first before using automatic mode using the --dry-run switch to see how it would handle things. 
+
+To run this script automatically on a schedule:
+
+# Windows Task Scheduler example:
+python c:/path/to/Manga_Download_Processor.py --auto --source "D:\Downloads\Manga" --dest "E:\Library"
+
+# Linux cron job example:
+0 3 * * * /usr/bin/python3 /path/to/Manga_Download_Processor.py --auto --source /path/to/downloads --dest /path/to/library >> /path/to/log_file.log 2>&1
 """
 
 import os
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import argparse
-import glob
 import subprocess
 import re   
 import shutil
@@ -23,6 +108,10 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 patterns = [
+    ('Complete_Series', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d+(?:\.\d+)?)\s+\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))*')),
+    ('Complex_Series', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3})\s+\((?P<Year>\d{4})\)')),
+    ('Complex_SeriesDecimal', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3}(?:\.\d+)?)\s+\((?P<Year>\d{4})\)')),
+    ('Complex_Series2', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3})\s+\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))+')),
     ('Ch', re.compile(r'(\b|_)(c|ch)(\.?\s?)(?P<Chapter>(\d+(\.\d)?)(-c?\d+(\.\d)?)?)')),
     ('Ch_bare', re.compile(r'^(?P<Series>.+?)(?<!Vol)(?<!Vol.)(?<!Volume)(?<!\sCh)(?<!\sChapter)\s(\d\s)?(?P<Chapter>\d+(?:\.\d+|-\d+)?)(?:\s\(\d{4}\))?(\b|_|-)')),
     ('Ch_bare2', re.compile(r'^(?!Vol)(?P<Series>.*)\s?(?<!vol\. )\sChapter\s(?P<Chapter>\d+(?:\.?[\d-]+)?)')),
@@ -36,17 +125,14 @@ patterns = [
     ('Simple_Ch', re.compile(r'Chapter(?P<Chapter>\d+(-\d+)?)')),
     ('Vol_Chp', re.compile(r'(?P<Series>.*)(\s|_)(vol\d+)?(\s|_)Chp\.? ?(?P<Chapter>\d+)')),
     ('V_Ch', re.compile(r'v\d+\.(\s|_)(?P<Chapter>\d+(?:.\d+|-\d+)?)')),
+    ('Titled_Vol', re.compile(r'(?P<Series>.*?)\s-\sVol\.\s(?P<Volume>\d+)')),
     ('Bare_Ch', re.compile(r'^((?!v|vo|vol|Volume).)*(\s|_)(?P<Chapter>\.?\d+(?:.\d+|-\d+)?)(?P<Part>b)?(\s|_|\[|\()')),
     ('Vol_Chapter', re.compile(r'(?P<Volume>((vol|volume|v))?(\s|_)?\.?\d+)(\s|_)(Chp|Chapter)\.?(\s|_)?(?P<Chapter>\d+)')),
     ('Vol_Chapter2', re.compile(r'(?P<Volume>((vol|volume|v))?(\s|_)?\.?\d+)(\s|_)(?P<Chapter>\d+)')),
     ('Vol_Chapter3', re.compile(r'(?P<Volume>((vol|volume|v))?(\s|_)?\.?\d+)(\s|_)(?P<Chapter>\d+(?:.\d+|-\d+)?)')),
     ('Vol_Chapter4', re.compile(r'(?P<Volume>((vol|volume|v))?(\s|_)?\.?\d+)(\s|_)(?P<Chapter>\d+(?:.\d+|-\d+)?)(\s|_)(?P<Extra>.*?)')),
-    ('Complex_Series', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3})\s+\(\d{4}\)')),
-    ('Complex_Series2', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3})\s+\(\d{4}\)\s(?P<Extra>.+?)')),
-    ('Complex_SeriesDecimal', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3}(?:\.\d+)?)\s+\(\d{4}\)')),
- #   ('Monolith', re.compile(r'(?P<Title>.+?)\s(?:(?:c|ch|chapter)?\s*(?P<Chapter>\d+(?:\.\d+)?))(?:\s-\s(?P<Extra>.*?))?(?:\s*\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))')),
     ('Vol_Chapter5', re.compile(r'(\b|_)(c|ch)(\.?\s?)(?P<Chapter>(\d+(\.\d)?)(-c?\d+(\.\d)?)?)')),
-    ('Titled_Vol', re.compile(r'(?P<Series>.*?)\s-\sVol\.\s(?P<Volume>\d+)')),
+    ('Monolith', re.compile(r'(?P<Title>.+?)\s(?:(?:c|ch|chapter)?\s*(?P<Chapter>\d+(?:\.\d+)?))(?:\s-\s(?P<Extra>.*?))?(?:\s*\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))')),
 ]
 
 GROUP_WEIGHTS = {
@@ -124,11 +210,21 @@ def score_match(match_dict, filename):
         return 0
         
     score = 0
-    
-    # Check for specific patterns that are more likely to be correct
+
+    # Reject matches with invalid captures
+    if not validate_match(match_dict):
+        return 0
+
+    # Boost specific reliable patterns
     pattern_name = getattr(match_dict, '_pattern_name', None)
+
     if pattern_name == 'Series_Dash_Ch':
         score += 4
+    elif pattern_name in ('Complete_Series', 'Complex_Series'):
+        # Very common format with series name and chapter number
+        if match_dict.get('Series') and match_dict.get('Chapter'):
+            if 'Year' in match_dict and match_dict['Year']:  # Having a year is a good indicator
+                score += 3
 
     # Add weighted scores for each group
     for key, value in match_dict.items():
@@ -152,8 +248,9 @@ def score_match(match_dict, filename):
                 if value.strip().endswith(("Ch.", "Ch", "Chapter")):
                     score -= 10
                 
+                # Strong penalty for ending with a separator
                 if value.strip().endswith(("-", ":", ".")):
-                    score -= 8  # Strong penalty for ending with a separator
+                    score -= 8 
                     
             elif key == 'Chapter':
                 # Validate chapter numbers
@@ -192,7 +289,22 @@ def score_match(match_dict, filename):
     
     return score
 
-def match_best_pattern(filename):
+def validate_match(match_dict):
+    """Additional validation checks for a matched pattern"""
+    # Check if there are invalid capture patterns
+    for key, value in match_dict.items():
+        if isinstance(value, str):
+            # Extra field shouldn't start with a parenthesis
+            if key == 'Extra' and value.startswith('('):
+                return False
+                
+            # Series name shouldn't end with dash or other separators
+            if key in ('Series', 'Title') and value.strip().endswith(('-', ':', '.', 'Ch.', 'Ch', 'Chapter')):
+                return False
+    
+    return True
+
+def match_best_pattern(filename, auto_mode=False):
     all_matches = []
     
     # Try all patterns and collect all matches with scores
@@ -200,6 +312,8 @@ def match_best_pattern(filename):
         match = pattern.match(filename)
         if match:
             match_dict = match.groupdict()
+            # Store pattern name for scoring reference
+            match_dict['_pattern_name'] = pattern_name
             score = score_match(match_dict, filename)
             all_matches.append((pattern_name, match_dict, score))
     
@@ -214,8 +328,17 @@ def match_best_pattern(filename):
     for i, (pattern_name, match_dict, score) in enumerate(all_matches[:3]):
         if i == 0 or score > 0:  # Only show positive scores beyond the top match
             logger.debug(f"  {pattern_name}: {match_dict} (Score: {score})")
-        
-    # If multiple matches with close scores, ask user
+
+    # In automatic mode, always select the best match if it's positive
+    if auto_mode:
+        if all_matches and all_matches[0][2] > 0:
+            logger.info(f"Auto-selecting best match for '{filename}': {all_matches[0][0]} (Score: {all_matches[0][2]})")
+            return all_matches[0][0], all_matches[0][1]
+        else:
+            logger.warning(f"No good matches found for '{filename}' in auto mode - skipping")
+            return None
+            
+    # Interactive mode matches with close scores, ask user
     if len(all_matches) > 1 and all_matches[0][2] > 0 and all_matches[0][2] - all_matches[1][2] < 4:
         print(f"\nMultiple good matches found for: {filename}")
         for i, (pattern_name, match_dict, score) in enumerate(all_matches[:3]):  # Show top 3
@@ -225,7 +348,6 @@ def match_best_pattern(filename):
         choice = input(f"\nSelect pattern (1-{min(3, len(all_matches))}) or 'M' for manual entry: ").strip()
         
         if choice.lower() == 'm':
-            # Manual entry code
             manual_series = input("Enter series name: ").strip()
             manual_chapter = input("Enter chapter number (or press Enter to skip): ").strip()
             manual_volume = input("Enter volume number (or press Enter to skip): ").strip()
@@ -243,7 +365,7 @@ def match_best_pattern(filename):
             if 0 <= idx < len(all_matches):
                 return all_matches[idx][0], all_matches[idx][1]
         except ValueError:
-            pass  # Fall back to best match if input is invalid
+            pass
     
     # If best score is very low, suggest manual entry
     if all_matches and all_matches[0][2] < 5:
@@ -254,9 +376,8 @@ def match_best_pattern(filename):
         choice = input("Accept this match? (Y/n/m for manual): ").strip().lower()
         
         if choice == 'n':
-            return None  # Skip this file
+            return None
         elif choice == 'm':
-            # Manual entry code
             manual_series = input("Enter series name: ").strip()
             manual_chapter = input("Enter chapter number (or press Enter to skip): ").strip()
             manual_volume = input("Enter volume number (or press Enter to skip): ").strip()
@@ -291,7 +412,7 @@ def match_best_pattern(filename):
         return ("Manual Entry", match_dict)
     
     print(f"Skipping file: {filename}")
-    return None  # Indicating that the file should be skipped
+    return None
 
 def extract_rars(folder_path):
     """Extract RAR files from a single folder."""
@@ -344,10 +465,14 @@ def cleanup_files(temp_dir, filepath, new_filepath, library_path, extracted_fold
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
 
-def process_directory(download_directory, library_path, dry_run=False):
+def process_directory(download_directory, library_path, dry_run=False, auto_mode=False):
     """Process manga files and move completed series folders to !Finished."""
     if dry_run:
         print("\n🔍 DRY RUN MODE - No files will be modified 🔍\n")
+    
+    if auto_mode:
+        logger.info("Running in automatic mode - no user prompts will be shown")
+
     success = True
     processed_folders = set()
     
@@ -384,7 +509,7 @@ def process_directory(download_directory, library_path, dry_run=False):
                             filename = os.path.basename(filepath)
                             try:
                                 # Process the extracted CBZ
-                                match_type, match_dict = match_best_pattern(filename)
+                                match_type, match_dict = match_best_pattern(filename, auto_mode)
                                 logger.info(f"\nProcessing extracted: {filename}")
                                 logger.info(f"Match Type: {match_type}")
                                 logger.info(f"Match: {match_dict}")
@@ -410,7 +535,7 @@ def process_directory(download_directory, library_path, dry_run=False):
             filepath = os.path.join(root, file)
             filename = os.path.basename(filepath)
             try:
-                match_type, match_dict = match_best_pattern(filename)
+                match_type, match_dict = match_best_pattern(filename, auto_mode)
                
                 if dry_run:
                     print(f"\n📄 Analyzing: {filename}")
@@ -484,7 +609,7 @@ def process_cbz_file(filepath, temp_dir, library_path, match_dict):
             def convert_image(img_path):
                 with Image.open(img_path) as img:
                     webp_path = os.path.splitext(img_path)[0] + '.webp'
-                    img.save(webp_path, 'WEBP', quality=80)
+                    img.save(webp_path, 'WEBP', quality=75)
                     return webp_path
 
             image_files = []
@@ -533,7 +658,7 @@ def move_to_library(source_file, library_path, series_name, volume=None, chapter
         file_name += f" v{volume}"
     if chapter:
         file_name += f" - Chapter {chapter}"
-    file_name += os.path.splitext(source_file)[1]  # Add the file extension
+    file_name += os.path.splitext(source_file)[1]
 
     dest_path = os.path.join(series_path, file_name)
 
@@ -543,12 +668,11 @@ def move_to_library(source_file, library_path, series_name, volume=None, chapter
 
     # Handle file already exists case
     if os.path.exists(dest_path):
-        # Check if source file has (F) in it
-        if "(F)" in os.path.basename(source_file):
-            # Replace existing file with the (F) version
+        # Replace existing file with the (F) or (F1)-(F9) version
+        if re.search(r'\(F\d?\)', os.path.basename(source_file)):
             os.remove(dest_path)
             shutil.move(source_file, dest_path)
-            logger.warning(f"Overwriting {dest_path} with {source_file} as it is a (F) version")
+            logger.warning(f"Overwriting {dest_path} with {source_file} as it is a fixed version")
         else:
             conflicts_path = os.path.join(download_directory, "!Conflicts")
             if not os.path.exists(conflicts_path):
@@ -600,6 +724,7 @@ def test_patterns(test_files):
                 print(f"  {i+1}. {pattern_name} (Score: {score})")
                 print(f"     {match_dict}")
             
+            # Show example of how this would be processed
             if positive_matches:
                 best_match = positive_matches[0]
                 series = best_match[1].get('Title') or best_match[1].get('Series')
@@ -630,11 +755,18 @@ def get_download_directory():
         print(f"Error: Directory '{download_directory}' does not exist")
 
 def parse_arguments():
+    """Parse command line arguments"""
     parser = argparse.ArgumentParser(description="Manga Unpacker and Library Manager")
     parser.add_argument("--dry-run", "-d", action="store_true", 
                         help="Test pattern matching without moving files")
     parser.add_argument("--test", "-t", action="store_true",
                         help="Run pattern tests on sample filenames")
+    parser.add_argument("--auto", "-a", action="store_true",
+                        help="Run in automatic mode without user prompts (for scheduled jobs)")
+    parser.add_argument("--source", "-s", type=str, metavar="DIR",
+                        help="Source directory with raw downloads to process")
+    parser.add_argument("--dest", "-l", type=str, metavar="DIR",
+                        help="Destination library path for processed files")
     parser.add_argument("filenames", nargs="*", 
                         help="Optional filenames to test (only used with --test)")
     return parser.parse_args()
@@ -663,6 +795,7 @@ if __name__ == '__main__':
         test_patterns(test_filenames)
         exit(0)
 
-    library_path = get_library_path()
-    download_directory = get_download_directory()
-    process_directory(download_directory, library_path, dry_run=args.dry_run)
+    library_path = args.dest if args.dest else get_library_path()
+    download_directory = args.source if args.source else get_download_directory()
+
+    process_directory(download_directory, library_path, dry_run=args.dry_run, auto_mode=args.auto)
