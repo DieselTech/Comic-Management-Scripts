@@ -2,6 +2,7 @@
 Manga Download Processor
 This script processes downloaded manga files, converting images to WebP format and moving them to a library directory.
 Creation Date: 2025-03-05 18:20
+Update Date: 2025-03-17 22:22
 
 Author: DieselTech
 
@@ -10,9 +11,10 @@ Author: DieselTech
 import os
 import logging
 from logging.handlers import TimedRotatingFileHandler
+import argparse
 import glob
 import subprocess
-import re
+import re   
 import shutil
 import zipfile
 from PIL import Image
@@ -22,8 +24,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 patterns = [
     ('Ch', re.compile(r'(\b|_)(c|ch)(\.?\s?)(?P<Chapter>(\d+(\.\d)?)(-c?\d+(\.\d)?)?)')),
-    ('Ch_bare', re.compile(r'^(?P<Series>.+?)(?<!Vol)(?<!Vol.)(?<!Volume)\s(\d\s)?(?P<Chapter>\d+(?:\.\d+|-\d+)?)(?:\s\(\d{4}\))?(\b|_|-)')),
+    ('Ch_bare', re.compile(r'^(?P<Series>.+?)(?<!Vol)(?<!Vol.)(?<!Volume)(?<!\sCh)(?<!\sChapter)\s(\d\s)?(?P<Chapter>\d+(?:\.\d+|-\d+)?)(?:\s\(\d{4}\))?(\b|_|-)')),
     ('Ch_bare2', re.compile(r'^(?!Vol)(?P<Series>.*)\s?(?<!vol\. )\sChapter\s(?P<Chapter>\d+(?:\.?[\d-]+)?)')),
+    ('Series_Dash_Ch', re.compile(r'^(?P<Series>.+?)\s-\s(?:Ch|Chapter)\.?\s(?P<Chapter>\d+(?:\.\d+)?)\.?(?:cbz|cbr)?$')),
+    ('Series_Ch_Number', re.compile(r'^(?P<Series>.+?)(?<!\s-)\s(?:Ch\.?|Chapter)\s?(?P<Chapter>\d+(?:\.\d+)?)')),
+    ('Series_Chapter', re.compile(r'^(?P<Series>.+?)(?<!\s[Vv]ol)(?<!\sVolume)\sChapter\s(?P<Chapter>\d+(?:\.\d+)?)')),
+    ('Series_Vol_Ch', re.compile(r'^(?P<Series>.+?)\sv(?P<Volume>\d+)(?:\s-\s)(?:Ch\.?|Chapter)\s?(?P<Chapter>\d+(?:\.\d+)?)')),
     ('Volume', re.compile(r'(?P<Title>.+?)\s(?:v|V)(?P<Volume>\d+)(?:\s-\s(?P<Extra>.*?))?\s*(?:\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))?')),
     ('ChapterExtras', re.compile(r'(?P<Title>.+?)(?=\s+(?:c|ch|chapter)\b|\s+c\d)(?:.*?(?:c|ch|chapter))?\s*(?P<Chapter>\d+(?:\.\d+)?)?(?:\s-\s(?P<Extra>.*?))?(?:\s*\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))?')),
     ('Chapter', re.compile(r'(?P<Title>.+?)\s(?:(?:c|ch|chapter)?\s*(?P<Chapter>\d+(?:\.\d+)?))?(?:\s-\s(?P<Extra>.*?))?\s*(?:\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))?')),
@@ -39,8 +45,24 @@ patterns = [
     ('Complex_Series2', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3})\s+\(\d{4}\)\s(?P<Extra>.+?)')),
     ('Complex_SeriesDecimal', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3}(?:\.\d+)?)\s+\(\d{4}\)')),
  #   ('Monolith', re.compile(r'(?P<Title>.+?)\s(?:(?:c|ch|chapter)?\s*(?P<Chapter>\d+(?:\.\d+)?))(?:\s-\s(?P<Extra>.*?))?(?:\s*\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))')),
-    ('Vol_Chapter5', re.compile(r'(\b|_)(c|ch)(\.?\s?)(?P<Chapter>(\d+(\.\d)?)(-c?\d+(\.\d)?)?)'))
+    ('Vol_Chapter5', re.compile(r'(\b|_)(c|ch)(\.?\s?)(?P<Chapter>(\d+(\.\d)?)(-c?\d+(\.\d)?)?)')),
+    ('Titled_Vol', re.compile(r'(?P<Series>.*?)\s-\sVol\.\s(?P<Volume>\d+)')),
 ]
+
+GROUP_WEIGHTS = {
+    'Series': 10,
+    'Title': 10, 
+    'Chapter': 8,
+    'Volume': 6,
+    'Year': 3,
+    'Extra': 2,
+    'Source': 1,
+    'Part': 1
+}
+
+# Quality indicators for pattern validation
+SERIES_MIN_LENGTH = 2  # Minimum characters for a valid series name
+MAX_REALISTIC_CHAPTER = 999  # Maximum realistic chapter number
 
 def setup_logging():
     # Create logger
@@ -96,60 +118,180 @@ def move_to_finished(download_directory):
             except Exception as e:
                 print(f"⚠ Error moving '{source_folder}' to '!Finished': {e}")
 
-def count_non_none_non_blank_keys(match_dict):
-#    print(sum(1 for key, value in match_dict.items() if value))
-    return sum(1 for key, value in match_dict.items() if value)
+def score_match(match_dict, filename):
+    """Score a match based on weighted groups and quality checks"""
+    if not match_dict:
+        return 0
+        
+    score = 0
+    
+    # Check for specific patterns that are more likely to be correct
+    pattern_name = getattr(match_dict, '_pattern_name', None)
+    if pattern_name == 'Series_Dash_Ch':
+        score += 4
+
+    # Add weighted scores for each group
+    for key, value in match_dict.items():
+        if value and isinstance(value, str) and value.strip():
+            # Add the weight for this group
+            score += GROUP_WEIGHTS.get(key, 1)
+            
+            # Additional quality checks
+            if key in ('Series', 'Title'):
+                # Higher score for longer series names (more specific matches)
+                if len(value.strip()) >= SERIES_MIN_LENGTH:
+                    score += min(len(value.strip()) / 10, 3)  # Up to 3 bonus points for long names
+                else:
+                    score -= 5  # Penalize very short series names
+                
+                # Penalize if the series name is just digits
+                if value.strip().isdigit():
+                    score -= 8
+                
+                # Penalize if series ends with "Ch." or "Chapter"
+                if value.strip().endswith(("Ch.", "Ch", "Chapter")):
+                    score -= 10
+                
+                if value.strip().endswith(("-", ":", ".")):
+                    score -= 8  # Strong penalty for ending with a separator
+                    
+            elif key == 'Chapter':
+                # Validate chapter numbers
+                try:
+                    ch_num = float(value.strip())
+                    # Bonus for common chapter number formats
+                    if 1 <= ch_num <= MAX_REALISTIC_CHAPTER:
+                        score += 2
+                    else:
+                        # Penalize unrealistic chapter numbers
+                        score -= 5
+                except ValueError:
+                    # Chapter not a clean number
+                    if '-' in value:  # Range like "1-3" is okay
+                        score += 1
+                    else:
+                        score -= 2
+    
+    # Ensure we have essential components (series name + chapter/volume)
+    has_series = bool(match_dict.get('Series') or match_dict.get('Title'))
+    has_numbering = bool(match_dict.get('Chapter') or match_dict.get('Volume'))
+    
+    if has_series and has_numbering:
+        score += 5  # Bonus for having both elements
+    elif not has_series:
+        score -= 10  # Major penalty for missing series name
+        
+    # Check if the match covers a substantial part of the filename
+    matched_parts = ''.join(str(v) for v in match_dict.values() if v)
+    coverage_ratio = len(matched_parts) / len(filename)
+    if coverage_ratio > 0.6:
+        score += 3  # Good coverage of the filename
+        
+    # Print debug info for development
+    # print(f"Score for {match_dict}: {score}")
+    
+    return score
 
 def match_best_pattern(filename):
-    best_matches = []
-    best_count = 0
+    all_matches = []
     
+    # Try all patterns and collect all matches with scores
     for pattern_name, pattern in patterns:
         match = pattern.match(filename)
         if match:
             match_dict = match.groupdict()
-            count = count_non_none_non_blank_keys(match_dict)
-            
-            if count > best_count:
-                best_count = count
-                best_matches = [(pattern_name, match_dict)]
-            elif count == best_count and count > 0:
-                best_matches.append((pattern_name, match_dict))
+            score = score_match(match_dict, filename)
+            all_matches.append((pattern_name, match_dict, score))
     
-    if not best_matches:
+    # Sort matches by score in descending order
+    all_matches.sort(key=lambda x: x[2], reverse=True)
+    
+    if not all_matches:
         return 'None', {}
+    
+    # Log top matches for debugging
+    logger.debug(f"Top matches for '{filename}':")
+    for i, (pattern_name, match_dict, score) in enumerate(all_matches[:3]):
+        if i == 0 or score > 0:  # Only show positive scores beyond the top match
+            logger.debug(f"  {pattern_name}: {match_dict} (Score: {score})")
         
-    if len(best_matches) > 1:
-        print(f"\nMultiple matches found for: {filename}")
-        for i, (pattern_name, match_dict) in enumerate(best_matches):
-            print(f"{i+1}. Pattern: {pattern_name}")
+    # If multiple matches with close scores, ask user
+    if len(all_matches) > 1 and all_matches[0][2] > 0 and all_matches[0][2] - all_matches[1][2] < 4:
+        print(f"\nMultiple good matches found for: {filename}")
+        for i, (pattern_name, match_dict, score) in enumerate(all_matches[:3]):  # Show top 3
+            print(f"{i+1}. Pattern: {pattern_name} (Score: {score})")
             print(f"   Match: {match_dict}")
         
-        choice = input(f"\nSelect pattern number (1-{len(best_matches)}) or enter 'M' to manually specify: ").strip()
-
-        if choice.lower() == 'm':  
+        choice = input(f"\nSelect pattern (1-{min(3, len(all_matches))}) or 'M' for manual entry: ").strip()
+        
+        if choice.lower() == 'm':
+            # Manual entry code
             manual_series = input("Enter series name: ").strip()
             manual_chapter = input("Enter chapter number (or press Enter to skip): ").strip()
-            match_dict = {'Series': manual_series, 'Chapter': manual_chapter} if manual_chapter else {'Series': manual_series}
+            manual_volume = input("Enter volume number (or press Enter to skip): ").strip()
+            
+            match_dict = {'Series': manual_series}
+            if manual_chapter:
+                match_dict['Chapter'] = manual_chapter
+            if manual_volume:
+                match_dict['Volume'] = manual_volume
+                
             return ("Manual Entry", match_dict)
-
-        return best_matches[int(choice) - 1]
-
-    elif len(best_matches) == 0:
-        print(f"\nNo matches found for: {filename}")
-        manual_choice = input("Enter 'M' to manually specify details, 'S' to skip this file: ").strip().lower()
-
-        if manual_choice == 'm':
-            manual_series = input("Enter series name: ").strip()
-            manual_chapter = input("Enter chapter number (or press Enter to skip): ").strip()
-            match_dict = {'Series': manual_series, 'Chapter': manual_chapter} if manual_chapter else {'Series': manual_series}
-            return ("Manual Entry", match_dict)
-        else:
-            print(f"Skipping file: {filename}")
-            return None  # Indicating that the file should be skipped
-
+        
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(all_matches):
+                return all_matches[idx][0], all_matches[idx][1]
+        except ValueError:
+            pass  # Fall back to best match if input is invalid
     
-    return best_matches[0]
+    # If best score is very low, suggest manual entry
+    if all_matches and all_matches[0][2] < 5:
+        print(f"\nLow confidence match for: {filename}")
+        print(f"Best match: {all_matches[0][0]} (Score: {all_matches[0][2]})")
+        print(f"Match data: {all_matches[0][1]}")
+        
+        choice = input("Accept this match? (Y/n/m for manual): ").strip().lower()
+        
+        if choice == 'n':
+            return None  # Skip this file
+        elif choice == 'm':
+            # Manual entry code
+            manual_series = input("Enter series name: ").strip()
+            manual_chapter = input("Enter chapter number (or press Enter to skip): ").strip()
+            manual_volume = input("Enter volume number (or press Enter to skip): ").strip()
+            
+            match_dict = {'Series': manual_series}
+            if manual_chapter:
+                match_dict['Chapter'] = manual_chapter
+            if manual_volume:
+                match_dict['Volume'] = manual_volume
+                
+            return ("Manual Entry", match_dict)
+    
+    # Return the best match if it exists and has a positive score
+    if all_matches and all_matches[0][2] > 0:
+        return all_matches[0][0], all_matches[0][1]
+    
+    # No good matches found
+    print(f"\nNo good matches found for: {filename}")
+    manual_choice = input("Enter 'M' to manually specify details, 'S' to skip this file: ").strip().lower()
+
+    if manual_choice == 'm':
+        manual_series = input("Enter series name: ").strip()
+        manual_chapter = input("Enter chapter number (or press Enter to skip): ").strip()
+        manual_volume = input("Enter volume number (or press Enter to skip): ").strip()
+        
+        match_dict = {'Series': manual_series}
+        if manual_chapter:
+            match_dict['Chapter'] = manual_chapter
+        if manual_volume:
+            match_dict['Volume'] = manual_volume
+            
+        return ("Manual Entry", match_dict)
+    
+    print(f"Skipping file: {filename}")
+    return None  # Indicating that the file should be skipped
 
 def extract_rars(folder_path):
     """Extract RAR files from a single folder."""
@@ -202,16 +344,19 @@ def cleanup_files(temp_dir, filepath, new_filepath, library_path, extracted_fold
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
 
-def process_directory(download_directory, library_path):
+def process_directory(download_directory, library_path, dry_run=False):
     """Process manga files and move completed series folders to !Finished."""
+    if dry_run:
+        print("\n🔍 DRY RUN MODE - No files will be modified 🔍\n")
     success = True
     processed_folders = set()
     
     # Create temp directory for processing
     temp_dir = os.path.join(download_directory, "!temp_processing")
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
-    os.makedirs(temp_dir)
+    if not dry_run:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        os.makedirs(temp_dir)
 
     # Walk through directory tree
     for root, _, files in os.walk(download_directory):
@@ -222,7 +367,14 @@ def process_directory(download_directory, library_path):
         # First handle RAR files if present
         rar_files = [f for f in files if f.endswith('.rar')]
         if rar_files:
+            if dry_run:
+                print(f"\n📁 Found {len(rar_files)} RAR files in {root}")
+                for rar_file in rar_files:
+                    print(f"  📦 Would extract: {rar_file}")
+                continue  # Skip actual extraction in dry run
+
             extracted_folders, num_extracted = extract_rars(root)
+
             if num_extracted > 0:
                 # Process extracted files
                 for extract_dir in extracted_folders:
@@ -259,6 +411,32 @@ def process_directory(download_directory, library_path):
             filename = os.path.basename(filepath)
             try:
                 match_type, match_dict = match_best_pattern(filename)
+               
+                if dry_run:
+                    print(f"\n📄 Analyzing: {filename}")
+                    print(f"  📋 Match type: {match_type}")
+                    print(f"  📋 Match data: {match_dict}")
+                    
+                    if match_dict:
+                        series = match_dict.get('Title') or match_dict.get('Series')
+                        destination = os.path.join(library_path, series)
+                        
+                        file_name = series
+                        if match_dict.get('Volume'):
+                            file_name += f" v{match_dict.get('Volume')}"
+                        if match_dict.get('Chapter'):
+                            file_name += f" - Chapter {match_dict.get('Chapter')}"
+                        file_name += ".cbz"  # Add the file extension
+                        
+                        dest_path = os.path.join(destination, file_name)
+                        print(f"  ➡️  Would move to: {dest_path}")
+                        
+                        # Check for potential conflicts
+                        if os.path.exists(destination):
+                            if os.path.exists(dest_path):
+                                print(f"  ⚠️  WARNING: File already exists at destination")
+                    continue  # Skip actual processing in dry run
+                
                 logger.info(f"\nProcessing: {filename}")
                 logger.info(f"Match Type: {match_type}")
                 logger.info(f"Match: {match_dict}")
@@ -274,7 +452,7 @@ def process_directory(download_directory, library_path):
                 success = False
 
         # Move folder to !Finished if all files processed
-        if root != download_directory:
+        if not dry_run and root != download_directory:
             finished_dir = os.path.join(download_directory, "!Finished")
             os.makedirs(finished_dir, exist_ok=True)
             folder_name = os.path.basename(root)
@@ -286,8 +464,11 @@ def process_directory(download_directory, library_path):
                 logger.error(f"Error moving folder '{folder_name}' to !Finished: {str(e)}")
 
     # Final cleanup
-    if os.path.exists(temp_dir):
+    if not dry_run and os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
+
+    if dry_run:
+        print("\n✅ Dry run completed. No files were modified.")
 
     return success
 
@@ -389,6 +570,51 @@ def move_to_library(source_file, library_path, series_name, volume=None, chapter
         shutil.move(source_file, dest_path)
         logger.info(f"Moved {source_file} to {dest_path}")
 
+def test_patterns(test_files):
+    """Test pattern matching against sample filenames"""
+    print("\n=== PATTERN TESTING ===")
+    
+    for filename in test_files:
+        print(f"\nTesting: {filename}")
+        
+        # Try all patterns
+        matches = []
+        for pattern_name, pattern in patterns:
+            match = pattern.match(filename)
+            if match:
+                match_dict = match.groupdict()
+                score = score_match(match_dict, filename)
+                matches.append((pattern_name, match_dict, score))
+        
+        # Sort by score
+        matches.sort(key=lambda x: x[2], reverse=True)
+        
+        # Filter to show only positive scoring matches
+        positive_matches = [m for m in matches if m[2] > 0]
+        
+        if not positive_matches:
+            print("  ❌ No matches found")
+        else:
+            print(f"  ✓ Found {len(positive_matches)} positive matches:")
+            for i, (pattern_name, match_dict, score) in enumerate(positive_matches):
+                print(f"  {i+1}. {pattern_name} (Score: {score})")
+                print(f"     {match_dict}")
+            
+            if positive_matches:
+                best_match = positive_matches[0]
+                series = best_match[1].get('Title') or best_match[1].get('Series')
+                volume = best_match[1].get('Volume')
+                chapter = best_match[1].get('Chapter')
+                
+                print("\n  📝 Processing result would be:")
+                print(f"     Series: {series}")
+                if volume:
+                    print(f"     Volume: {volume}")
+                if chapter:
+                    print(f"     Chapter: {chapter}")
+    
+    print("\n=== TESTING COMPLETE ===")
+
 def get_library_path():
     while True:
         library_path = input("Enter your comic library path: ")
@@ -403,8 +629,40 @@ def get_download_directory():
             return download_directory
         print(f"Error: Directory '{download_directory}' does not exist")
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Manga Unpacker and Library Manager")
+    parser.add_argument("--dry-run", "-d", action="store_true", 
+                        help="Test pattern matching without moving files")
+    parser.add_argument("--test", "-t", action="store_true",
+                        help="Run pattern tests on sample filenames")
+    parser.add_argument("filenames", nargs="*", 
+                        help="Optional filenames to test (only used with --test)")
+    return parser.parse_args()
+
 if __name__ == '__main__':
     logger = setup_logging()
+    args = parse_arguments()
+
+    if args.test:
+        if args.filenames:
+            # Use filenames provided on command line
+            test_filenames = args.filenames
+        else:
+            # Enter interactive test mode
+            print("\n=== PATTERN TESTING MODE ===")
+            print("Enter filenames to test (one per line).")
+            print("Leave blank and press Enter to finish.\n")
+            
+            test_filenames = []
+            while True:
+                filename = input("Enter filename to test (or press Enter to finish): ").strip()
+                if not filename:
+                    break
+                test_filenames.append(filename)
+
+        test_patterns(test_filenames)
+        exit(0)
+
     library_path = get_library_path()
     download_directory = get_download_directory()
-    process_directory(download_directory, library_path)
+    process_directory(download_directory, library_path, dry_run=args.dry_run)
