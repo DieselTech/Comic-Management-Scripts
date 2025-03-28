@@ -94,6 +94,7 @@ python c:/path/to/Manga_Download_Processor.py --auto --source "D:\Downloads\Mang
 0 3 * * * /usr/bin/python3 /path/to/Manga_Download_Processor.py --auto --source /path/to/downloads --dest /path/to/library >> /path/to/log_file.log 2>&1
 """
 
+
 import os
 import logging
 from logging.handlers import TimedRotatingFileHandler
@@ -419,7 +420,6 @@ def extract_rars(folder_path):
     extracted_folders = []
     num_extracted = 0
     
-    # Only look for RAR files in this specific folder, not recursively
     for file in os.listdir(folder_path):
         if file.endswith('.rar'):
             rar_path = os.path.join(folder_path, file)
@@ -465,7 +465,7 @@ def cleanup_files(temp_dir, filepath, new_filepath, library_path, extracted_fold
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
 
-def process_directory(download_directory, library_path, dry_run=False, auto_mode=False):
+def process_directory(download_directory, library_path, dry_run=False, auto_mode=False, process_mode="standard"):
     """Process manga files and move completed series folders to !Finished."""
     if dry_run:
         print("\n🔍 DRY RUN MODE - No files will be modified 🔍\n")
@@ -473,8 +473,11 @@ def process_directory(download_directory, library_path, dry_run=False, auto_mode
     if auto_mode:
         logger.info("Running in automatic mode - no user prompts will be shown")
 
+    logger.info(f"Running in {process_mode} processing mode")
+
     success = True
     processed_folders = set()
+    processed_files = set()  # Track individual files that were processed
     
     # Create temp directory for processing
     temp_dir = os.path.join(download_directory, "!temp_processing")
@@ -489,104 +492,78 @@ def process_directory(download_directory, library_path, dry_run=False, auto_mode
         if any(special in root for special in ["!Finished", "!temp_processing", "!temp_extract"]):
             continue
             
-        # First handle RAR files if present
-        rar_files = [f for f in files if f.endswith('.rar')]
-        if rar_files:
-            if dry_run:
-                print(f"\n📁 Found {len(rar_files)} RAR files in {root}")
-                for rar_file in rar_files:
-                    print(f"  📦 Would extract: {rar_file}")
-                continue  # Skip actual extraction in dry run
-
-            extracted_folders, num_extracted = extract_rars(root)
-
-            if num_extracted > 0:
-                # Process extracted files
-                for extract_dir in extracted_folders:
-                    for extracted_file in os.listdir(extract_dir):
-                        if extracted_file.endswith('.cbz'):
-                            filepath = os.path.join(extract_dir, extracted_file)
-                            filename = os.path.basename(filepath)
-                            try:
-                                # Process the extracted CBZ
-                                match_type, match_dict = match_best_pattern(filename, auto_mode)
-                                logger.info(f"\nProcessing extracted: {filename}")
-                                logger.info(f"Match Type: {match_type}")
-                                logger.info(f"Match: {match_dict}")
-
-                                if not match_dict or (not match_dict.get('Title') and not match_dict.get('Series')):
-                                    logger.warning(f"Could not determine series for {filename}")
-                                    continue
-
-                                # Process extracted CBZ file
-                                success &= process_cbz_file(filepath, temp_dir, library_path, match_dict)
-                            except Exception as e:
-                                logger.error(f"Error processing extracted file {filepath}: {str(e)}")
-                                success = False
-
-                # Clean up extraction folders
-                for folder in extracted_folders:
-                    if os.path.exists(folder):
-                        shutil.rmtree(folder)
-
-        # Then handle regular CBZ files
+        # Skip directories with no relevant files
         cbz_files = [f for f in files if f.endswith('.cbz')]
-        for file in cbz_files:
-            filepath = os.path.join(root, file)
-            filename = os.path.basename(filepath)
-            try:
-                match_type, match_dict = match_best_pattern(filename, auto_mode)
-               
-                if dry_run:
-                    print(f"\n📄 Analyzing: {filename}")
-                    print(f"  📋 Match type: {match_type}")
-                    print(f"  📋 Match data: {match_dict}")
-                    
-                    if match_dict:
-                        series = match_dict.get('Title') or match_dict.get('Series')
-                        destination = os.path.join(library_path, series)
-                        
-                        file_name = series
-                        if match_dict.get('Volume'):
-                            file_name += f" v{match_dict.get('Volume')}"
-                        if match_dict.get('Chapter'):
-                            file_name += f" - Chapter {match_dict.get('Chapter')}"
-                        file_name += ".cbz"  # Add the file extension
-                        
-                        dest_path = os.path.join(destination, file_name)
-                        print(f"  ➡️  Would move to: {dest_path}")
-                        
-                        # Check for potential conflicts
-                        if os.path.exists(destination):
-                            if os.path.exists(dest_path):
-                                print(f"  ⚠️  WARNING: File already exists at destination")
-                    continue  # Skip actual processing in dry run
-                
-                logger.info(f"\nProcessing: {filename}")
-                logger.info(f"Match Type: {match_type}")
-                logger.info(f"Match: {match_dict}")
-
-                if not match_dict or (not match_dict.get('Title') and not match_dict.get('Series')):
-                    logger.warning(f"Could not determine series for {filename}")
-                    continue
-
-                # Process the CBZ file
-                success &= process_cbz_file(filepath, temp_dir, library_path, match_dict)
-            except Exception as e:
-                logger.error(f"Error processing {filepath}: {str(e)}")
-                success = False
-
-        # Move folder to !Finished if all files processed
-        if not dry_run and root != download_directory:
-            finished_dir = os.path.join(download_directory, "!Finished")
-            os.makedirs(finished_dir, exist_ok=True)
-            folder_name = os.path.basename(root)
+        rar_files = [f for f in files if f.endswith('.rar')]
+        
+        if not cbz_files and not rar_files:
+            logger.debug(f"Skipping directory with no CBZ or RAR files: {root}")
+            continue
+        
+        # Determine which processing mode to use for this folder
+        folder_process_mode = process_mode
+        if process_mode == "auto":
+            # Auto-detect based on content
+            folder_process_mode = "bulk" if rar_files else "standard"
+            logger.info(f"Auto-detected mode for {root}: {folder_process_mode}")
+        
+        # Process according to the selected mode
+        processed_file_list = []  # Track which files were processed in this folder
+        if folder_process_mode == "bulk" and rar_files:
+            # Bulk mode: Process RAR files containing multiple CBZs
+            process_result, processed_file_list = process_bulk_archives(root, files, temp_dir, library_path, auto_mode, dry_run)
+            logger.info(f"Bulk processing of {root} {'successful' if process_result else 'failed'}")
+        elif cbz_files:
+            # Standard mode: Process individual CBZ files
+            process_result, processed_file_list = process_individual_files(root, files, temp_dir, library_path, auto_mode, dry_run)
+            logger.info(f"Standard processing of {root} {'successful' if process_result else 'failed'}")
+        else:
+            # No processable files in this folder
+            logger.info(f"No processable files in {root} for mode {folder_process_mode}")
+            process_result = False
+            
+        # Track processed files
+        for processed_file in processed_file_list:
+            processed_files.add(os.path.join(root, processed_file))
+            
+        # Track this folder as processed if appropriate
+        if not dry_run and root != download_directory and process_result:
+            logger.info(f"Marking folder for completion: {root}")
+            processed_folders.add(root)
+        
+    # After processing all files, move completed folders to !Finished
+    if not dry_run:
+        finished_dir = os.path.join(download_directory, "!Finished")
+        os.makedirs(finished_dir, exist_ok=True)
+        
+        # Move processed folders
+        logger.info(f"Moving {len(processed_folders)} folders to !Finished")
+        for folder in processed_folders:
+            folder_name = os.path.basename(folder)
             dest_path = os.path.join(finished_dir, folder_name)
             try:
-                shutil.move(root, dest_path)
-                logger.info(f"Moved completed folder '{folder_name}' to !Finished")
+                if os.path.exists(folder):
+                    logger.info(f"Moving folder to !Finished: {folder}")
+                    shutil.move(folder, dest_path)
+                    logger.info(f"Moved completed folder '{folder_name}' to !Finished")
+                else:
+                    logger.warning(f"Folder no longer exists, can't move to !Finished: {folder}")
             except Exception as e:
                 logger.error(f"Error moving folder '{folder_name}' to !Finished: {str(e)}")
+        
+        # Move processed files that are directly in the download directory
+        root_processed_files = [f for f in processed_files if os.path.dirname(f) == download_directory]
+        if root_processed_files:
+            logger.info(f"Moving {len(root_processed_files)} files from root directory to !Finished")
+            for file_path in root_processed_files:
+                if os.path.exists(file_path):
+                    file_name = os.path.basename(file_path)
+                    dest_path = os.path.join(finished_dir, file_name)
+                    try:
+                        logger.info(f"Moving file to !Finished: {file_name}")
+                        shutil.move(file_path, dest_path)
+                    except Exception as e:
+                        logger.error(f"Error moving file '{file_name}' to !Finished: {str(e)}")
 
     # Final cleanup
     if not dry_run and os.path.exists(temp_dir):
@@ -596,6 +573,152 @@ def process_directory(download_directory, library_path, dry_run=False, auto_mode
         print("\n✅ Dry run completed. No files were modified.")
 
     return success
+
+def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry_run):
+    """Process individual CBZ files directly"""
+    cbz_files = [f for f in files if f.endswith('.cbz')]
+    
+    if not cbz_files:
+        logger.info(f"No CBZ files found to process in {root}")
+        return False  # No CBZ files to process, not successful
+    
+    if dry_run:
+        print(f"\n📁 Found {len(cbz_files)} CBZ files in {root} (standard mode)")
+        for cbz_file in cbz_files:
+            filename = cbz_file
+            try:
+                match_type, match_dict = match_best_pattern(filename, auto_mode)
+                print(f"\n📄 Analyzing: {filename}")
+                print(f"  📋 Match type: {match_type}")
+                print(f"  📋 Match data: {match_dict}")
+                
+                if match_dict:
+                    series = match_dict.get('Title') or match_dict.get('Series')
+                    destination = os.path.join(library_path, series)
+                    
+                    file_name = series
+                    if match_dict.get('Volume'):
+                        file_name += f" v{match_dict.get('Volume')}"
+                    if match_dict.get('Chapter'):
+                        file_name += f" - Chapter {match_dict.get('Chapter')}"
+                    file_name += ".cbz"  # Add the file extension
+                    
+                    dest_path = os.path.join(destination, file_name)
+                    print(f"  ➡️  Would move to: {dest_path}")
+                    
+                    # Check for potential conflicts
+                    if os.path.exists(destination) and os.path.exists(dest_path):
+                        print(f"  ⚠️  WARNING: File already exists at destination")
+            except Exception as e:
+                print(f"  ❌ Error analyzing {filename}: {str(e)}")
+        return True
+    
+    success = True
+    files_processed = False
+    processed_files = []  # Track which files were actually processed
+    
+    for file in cbz_files:
+        filepath = os.path.join(root, file)
+        filename = os.path.basename(filepath)
+        try:
+            match_result = match_best_pattern(filename, auto_mode)
+            if match_result is None:
+                logger.warning(f"Skipping file with no match: {filename}")
+                continue
+                
+            match_type, match_dict = match_result
+            
+            logger.info(f"\nProcessing: {filename}")
+            logger.info(f"Match Type: {match_type}")
+            logger.info(f"Match: {match_dict}")
+
+            if not match_dict or (not match_dict.get('Title') and not match_dict.get('Series')):
+                logger.warning(f"Could not determine series for {filename}")
+                continue
+
+            # Process the CBZ file
+            result = process_cbz_file(filepath, temp_dir, library_path, match_dict)
+            if result:
+                files_processed = True  # Mark at least one file as processed
+                processed_files.append(file)  # Add to list of processed files
+            success = success and result
+        except Exception as e:
+            logger.error(f"Error processing {filepath}: {str(e)}")
+            success = False
+    
+    # Only return success if we actually processed files
+    return success and files_processed, processed_files
+
+def process_bulk_archives(root, files, temp_dir, library_path, auto_mode, dry_run):
+    """Process RAR files containing multiple CBZs"""
+    rar_files = [f for f in files if f.endswith('.rar')]
+    
+    if not rar_files:
+        logger.info("No RAR files found to process in bulk mode")
+        return False  # No RAR files to process, not successful
+    
+    if dry_run:
+        print(f"\n📁 Found {len(rar_files)} RAR files in {root} (bulk mode)")
+        for rar_file in rar_files:
+            print(f"  📦 Would extract: {rar_file}")
+        return True
+    
+    success = True
+    files_processed = False
+    extracted_folders, num_extracted = extract_rars(root)
+    
+    if num_extracted > 0:
+        # Process extracted files
+        for extract_dir in extracted_folders:
+            extracted_cbz_files = [f for f in os.listdir(extract_dir) if f.endswith('.cbz')]
+            logger.info(f"Found {len(extracted_cbz_files)} CBZ files in extracted folder: {extract_dir}")
+            
+            if not extracted_cbz_files:
+                logger.warning(f"No CBZ files found in extracted folder: {extract_dir}")
+                continue
+                
+            files_processed = True
+            for extracted_file in extracted_cbz_files:
+                filepath = os.path.join(extract_dir, extracted_file)
+                filename = os.path.basename(filepath)
+                try:
+                    # Process the extracted CBZ
+                    match_result = match_best_pattern(filename, auto_mode)
+                    if match_result is None:
+                        logger.warning(f"Skipping file with no match: {filename}")
+                        continue
+                        
+                    match_type, match_dict = match_result
+                    logger.info(f"\nProcessing extracted: {filename}")
+                    logger.info(f"Match Type: {match_type}")
+                    logger.info(f"Match: {match_dict}")
+
+                    if not match_dict or (not match_dict.get('Title') and not match_dict.get('Series')):
+                        logger.warning(f"Could not determine series for {filename}")
+                        continue
+
+                    # Process extracted CBZ file
+                    result = process_cbz_file(filepath, temp_dir, library_path, match_dict)
+                    success = success and result
+                except Exception as e:
+                    logger.error(f"Error processing extracted file {filepath}: {str(e)}")
+                    success = False
+    else:
+        logger.warning("No files extracted from RAR archives")
+        success = False
+    
+    # Clean up extraction folders
+    for folder in extracted_folders:
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+    
+    processed_files = []
+    if not dry_run:
+        for file in rar_files:
+            if success and files_processed:
+                processed_files.append(file)
+
+    return success and files_processed, processed_files
 
 def process_cbz_file(filepath, temp_dir, library_path, match_dict):
     """Process a single CBZ file."""
@@ -769,6 +892,9 @@ def parse_arguments():
                         help="Destination library path for processed files")
     parser.add_argument("filenames", nargs="*", 
                         help="Optional filenames to test (only used with --test)")
+    parser.add_argument("--mode", "-m", type=str, choices=["standard", "bulk", "nested", "auto"], default="auto",
+                        help="Processing mode: standard (individual files), bulk (archives containing multiple CBZs), "
+                             "nested (folders of archives), auto (detect based on content)")
     return parser.parse_args()
 
 if __name__ == '__main__':
@@ -798,4 +924,4 @@ if __name__ == '__main__':
     library_path = args.dest if args.dest else get_library_path()
     download_directory = args.source if args.source else get_download_directory()
 
-    process_directory(download_directory, library_path, dry_run=args.dry_run, auto_mode=args.auto)
+    process_directory(download_directory, library_path, dry_run=args.dry_run, auto_mode=args.auto, process_mode=args.mode)
