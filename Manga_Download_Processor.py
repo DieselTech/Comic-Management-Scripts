@@ -10,15 +10,15 @@ Did I break it?:
 --------------
 
 If something isn't working correctly or you are getting bad matches, let me know by opening an issue.
-Helping improve the regex patterns will help everyone in down the line. Also, I know a lot of this code
-is crap. Especially the part around processing directories. I'll get around to making it better at some point.
+Helping improve the regex patterns will help everyone down the line. Also, I know a lot of this code
+is crap. But for me, it is working crap. If you can improve things, submit a PR. 
 
 
 Requirements:
 ------------
-- Python 3.6+
-- Dependencies: PIL (Pillow), tqdm, unrar (external command-line tool)
-  Install with: pip install Pillow tqdm
+- Python 3.6+ (Tested and developed on 3.13) 
+- Dependencies: PIL (Pillow), tqdm, zipfile, unrar (external command-line tool)
+  Install with: pip install Pillow tqdm zipfile
 
 - The unrar command-line tool must be installed separately:
   • Windows: Download from https://www.rarlab.com/rar_add.htm
@@ -36,6 +36,8 @@ Arguments:
   --auto, -a          Run in automatic mode without user prompts (for scheduled jobs)
   --source, -s DIR    Source directory with raw downloads to process
   --dest, -l DIR      Destination library path for processed files
+  --mode, -m          Processing mode: standard (individual files), bulk (archives containing multiple CBZs),
+                            nested (folders of archives), auto (detect based on content)
   
 Examples:
 --------
@@ -152,11 +154,9 @@ SERIES_MIN_LENGTH = 2  # Minimum characters for a valid series name
 MAX_REALISTIC_CHAPTER = 999  # Maximum realistic chapter number
 
 def setup_logging():
-    # Create logger
     logger = logging.getLogger('MangaUnpacker')
     logger.setLevel(logging.DEBUG)
 
-    # Create formatters
     file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     console_formatter = logging.Formatter('%(message)s')
 
@@ -178,7 +178,6 @@ def setup_logging():
     console_handler.setFormatter(console_formatter)
     console_handler.setLevel(logging.INFO)
 
-    # Add handlers to logger
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
 
@@ -197,7 +196,6 @@ def move_to_finished(download_directory):
         if folder in ["!Finished", "!temp_processing", "!temp_extract"]:
             continue
         
-        # Move only directories
         if os.path.isdir(source_folder):
             try:
                 shutil.move(source_folder, destination_folder)
@@ -222,7 +220,6 @@ def score_match(match_dict, filename):
     if pattern_name == 'Series_Dash_Ch':
         score += 4
     elif pattern_name in ('Complete_Series', 'Complex_Series'):
-        # Very common format with series name and chapter number
         if match_dict.get('Series') and match_dict.get('Chapter'):
             if 'Year' in match_dict and match_dict['Year']:  # Having a year is a good indicator
                 score += 3
@@ -233,7 +230,6 @@ def score_match(match_dict, filename):
             # Add the weight for this group
             score += GROUP_WEIGHTS.get(key, 1)
             
-            # Additional quality checks
             if key in ('Series', 'Title'):
                 # Higher score for longer series names (more specific matches)
                 if len(value.strip()) >= SERIES_MIN_LENGTH:
@@ -249,12 +245,11 @@ def score_match(match_dict, filename):
                 if value.strip().endswith(("Ch.", "Ch", "Chapter")):
                     score -= 10
                 
-                # Strong penalty for ending with a separator
+                # Penalty for ending with a separator
                 if value.strip().endswith(("-", ":", ".")):
                     score -= 8 
                     
             elif key == 'Chapter':
-                # Validate chapter numbers
                 try:
                     ch_num = float(value.strip())
                     # Bonus for common chapter number formats
@@ -285,7 +280,7 @@ def score_match(match_dict, filename):
     if coverage_ratio > 0.6:
         score += 3  # Good coverage of the filename
         
-    # Print debug info for development
+    # Print debug
     # print(f"Score for {match_dict}: {score}")
     
     return score
@@ -477,7 +472,7 @@ def process_directory(download_directory, library_path, dry_run=False, auto_mode
 
     success = True
     processed_folders = set()
-    processed_files = set()  # Track individual files that were processed
+    processed_files = set()
     
     # Create temp directory for processing
     temp_dir = os.path.join(download_directory, "!temp_processing")
@@ -580,7 +575,7 @@ def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry
     
     if not cbz_files:
         logger.info(f"No CBZ files found to process in {root}")
-        return False  # No CBZ files to process, not successful
+        return False  # not successful
     
     if dry_run:
         print(f"\n📁 Found {len(cbz_files)} CBZ files in {root} (standard mode)")
@@ -615,7 +610,7 @@ def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry
     
     success = True
     files_processed = False
-    processed_files = []  # Track which files were actually processed
+    processed_files = []
     
     for file in cbz_files:
         filepath = os.path.join(root, file)
