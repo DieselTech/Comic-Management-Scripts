@@ -6,25 +6,12 @@ A tool for organizing and processing manga/comic files by automatically detectin
 chapter numbers, and volume information from filenames. This script can extract compressed files, 
 convert images to WebP format for space savings, and organize files into a structured library.
 
-Did I break it?:
---------------
-
-If something isn't working correctly or you are getting bad matches, let me know by opening an issue.
-Helping improve the regex patterns will help everyone down the line. Also, I know a lot of this code
-is crap. But for me, it is working crap. If you can improve things, submit a PR. 
-
-
 Requirements:
 ------------
-- Python 3.6+ (Tested and developed on 3.13) 
-- Dependencies: PIL (Pillow), tqdm, zipfile, unrar (external command-line tool)
-  Install with: pip install Pillow tqdm zipfile
+- Python 3.6+
+- Dependencies: PIL (Pillow), rich, colorama, unrar (external command-line tool)
+  Install with: pip install Pillow rich colorama
 
-- The unrar command-line tool must be installed separately:
-  • Windows: Download from https://www.rarlab.com/rar_add.htm
-  • Linux: sudo apt install unrar (Ubuntu/Debian) or sudo dnf install unrar (Fedora)
-  • macOS: brew install unrar (using Homebrew)
-  
 Usage:
 -----
 python Manga_Download_Processor.py [options]
@@ -36,8 +23,7 @@ Arguments:
   --auto, -a          Run in automatic mode without user prompts (for scheduled jobs)
   --source, -s DIR    Source directory with raw downloads to process
   --dest, -l DIR      Destination library path for processed files
-  --mode, -m          Processing mode: standard (individual files), bulk (archives containing multiple CBZs),
-                            nested (folders of archives), auto (detect based on content)
+  --mode, -m MODE     Processing mode: standard, bulk, nested, or auto (default)
   
 Examples:
 --------
@@ -53,8 +39,17 @@ python Manga_Download_Processor.py --test "My Series c10 (2023).cbz" "Another Ex
 # Fully automated mode for scheduled jobs:
 python Manga_Download_Processor.py --auto --source /path/to/downloads --dest /path/to/library
 
-# Combine automatic mode with dry run for testing:
-python Manga_Download_Processor.py --auto --dry-run --source /path/to/downloads --dest /path/to/library
+# Process using specific mode:
+python Manga_Download_Processor.py --mode bulk --source /path/to/downloads --dest /path/to/library
+
+User Interface:
+-------------
+The script features a modern, colorful interface with:
+- Interactive prompts for configuration
+- Visual progress indicators during conversion
+- Clear summary information before processing
+- Color-coded output for better readability
+- Operation confirmation to prevent accidental actions
 
 Pattern Matching System:
 ----------------------
@@ -71,44 +66,50 @@ Quality checks are applied to penalize unrealistic matches like:
 - Unrealistic chapter numbers
 - Missing essential components
 
+Folder Structure:
+---------------
+The script creates and manages these special folders:
+- !temp_processing: Temporary folder for file conversion
+- !temp_extract: Used for extracting compressed files
+- !Finished: Completed series folders are moved here
+- !Conflicts: Files that would overwrite existing ones
+
 Library Organization:
 ------------------
-Files will be organized into their own series folder based on the series name that is parsed out.
-If a volume number or chapter number is found, this info will be added to the filename. 
-
-For example the filename "My Series c10 (2023).cbz" would get sorted to:
-
+Files will be organized as:
 /library_path/
-  /My Series/
-    My Series - Chapter 10.cbz
+  /Series Name/
+    Series Name v1 - Chapter 1.cbz
+    Series Name v1 - Chapter 2.cbz
+    ...
 
 Automation:
 ---------
-When ran in automatic mode the first match will be chosen because human input isn't possible.
-You should test the script out first before using automatic mode using the --dry-run switch to see how it would handle things. 
-
 To run this script automatically on a schedule:
 
 # Windows Task Scheduler example:
-python c:/path/to/Manga_Download_Processor.py --auto --source "D:\Downloads\Manga" --dest "E:\Library"
+python c:/path/to/Manga_Download_Processor.py --auto --source "D:/Downloads/Manga" --dest "E:/Library"
 
 # Linux cron job example:
 0 3 * * * /usr/bin/python3 /path/to/Manga_Download_Processor.py --auto --source /path/to/downloads --dest /path/to/library >> /path/to/log_file.log 2>&1
 """
-
 
 import os
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import argparse
 import subprocess
-import re   
+import re
 import shutil
 import zipfile
+from rich.progress import Progress, TextColumn, BarColumn, SpinnerColumn, TimeElapsedColumn, TimeRemainingColumn
 from PIL import Image
 from datetime import date
-from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from colorama import init, Fore, Back, Style
+
+
+init(autoreset=True)
 
 patterns = [
     ('Complete_Series', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d+(?:\.\d+)?)\s+\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))*')),
@@ -154,13 +155,13 @@ SERIES_MIN_LENGTH = 2  # Minimum characters for a valid series name
 MAX_REALISTIC_CHAPTER = 999  # Maximum realistic chapter number
 
 def setup_logging():
+    # Create logger with daily rotation and proper formatting
     logger = logging.getLogger('MangaUnpacker')
     logger.setLevel(logging.DEBUG)
 
     file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     console_formatter = logging.Formatter('%(message)s')
 
-    # File handler (daily rotation)
     log_file = os.path.join(os.path.dirname(__file__), 'logs', 'MangaUnpacker.log')
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     file_handler = TimedRotatingFileHandler(
@@ -173,7 +174,6 @@ def setup_logging():
     file_handler.setFormatter(file_formatter)
     file_handler.setLevel(logging.DEBUG)
 
-    # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(console_formatter)
     console_handler.setLevel(logging.INFO)
@@ -221,80 +221,67 @@ def score_match(match_dict, filename):
         score += 4
     elif pattern_name in ('Complete_Series', 'Complex_Series'):
         if match_dict.get('Series') and match_dict.get('Chapter'):
-            if 'Year' in match_dict and match_dict['Year']:  # Having a year is a good indicator
+            if 'Year' in match_dict and match_dict['Year']:
                 score += 3
 
     # Add weighted scores for each group
     for key, value in match_dict.items():
         if value and isinstance(value, str) and value.strip():
-            # Add the weight for this group
             score += GROUP_WEIGHTS.get(key, 1)
             
+            # Quality checks for specific fields
             if key in ('Series', 'Title'):
-                # Higher score for longer series names (more specific matches)
                 if len(value.strip()) >= SERIES_MIN_LENGTH:
-                    score += min(len(value.strip()) / 10, 3)  # Up to 3 bonus points for long names
+                    score += min(len(value.strip()) / 10, 3)
                 else:
-                    score -= 5  # Penalize very short series names
+                    score -= 5
                 
-                # Penalize if the series name is just digits
                 if value.strip().isdigit():
                     score -= 8
                 
-                # Penalize if series ends with "Ch." or "Chapter"
                 if value.strip().endswith(("Ch.", "Ch", "Chapter")):
                     score -= 10
                 
-                # Penalty for ending with a separator
                 if value.strip().endswith(("-", ":", ".")):
                     score -= 8 
                     
             elif key == 'Chapter':
                 try:
                     ch_num = float(value.strip())
-                    # Bonus for common chapter number formats
                     if 1 <= ch_num <= MAX_REALISTIC_CHAPTER:
                         score += 2
                     else:
-                        # Penalize unrealistic chapter numbers
                         score -= 5
                 except ValueError:
-                    # Chapter not a clean number
-                    if '-' in value:  # Range like "1-3" is okay
+                    if '-' in value:
                         score += 1
                     else:
                         score -= 2
     
-    # Ensure we have essential components (series name + chapter/volume)
+    # Check for essential components
     has_series = bool(match_dict.get('Series') or match_dict.get('Title'))
     has_numbering = bool(match_dict.get('Chapter') or match_dict.get('Volume'))
     
     if has_series and has_numbering:
-        score += 5  # Bonus for having both elements
+        score += 5
     elif not has_series:
-        score -= 10  # Major penalty for missing series name
+        score -= 10
         
-    # Check if the match covers a substantial part of the filename
+    # Bonus for good filename coverage
     matched_parts = ''.join(str(v) for v in match_dict.values() if v)
     coverage_ratio = len(matched_parts) / len(filename)
     if coverage_ratio > 0.6:
-        score += 3  # Good coverage of the filename
-        
-    # Print debug
-    # print(f"Score for {match_dict}: {score}")
+        score += 3
     
     return score
 
 def validate_match(match_dict):
     """Additional validation checks for a matched pattern"""
-    # Check if there are invalid capture patterns
     for key, value in match_dict.items():
         if isinstance(value, str):
-            # Extra field shouldn't start with a parenthesis
             if key == 'Extra' and value.startswith('('):
                 return False
                 
-            # Series name shouldn't end with dash or other separators
             if key in ('Series', 'Title') and value.strip().endswith(('-', ':', '.', 'Ch.', 'Ch', 'Chapter')):
                 return False
     
@@ -462,111 +449,105 @@ def cleanup_files(temp_dir, filepath, new_filepath, library_path, extracted_fold
 
 def process_directory(download_directory, library_path, dry_run=False, auto_mode=False, process_mode="standard"):
     """Process manga files and move completed series folders to !Finished."""
+    print(f"\n{Fore.CYAN}{'='*60}")
+    print(f"{Fore.CYAN}🚀 PROCESSING COMICS")
+    print(f"{Fore.CYAN}{'='*60}")
+    
     if dry_run:
-        print("\n🔍 DRY RUN MODE - No files will be modified 🔍\n")
+        print(f"\n{Fore.YELLOW}🔍 DRY RUN MODE - No files will be modified")
     
     if auto_mode:
-        logger.info("Running in automatic mode - no user prompts will be shown")
+        print(f"{Fore.BLUE}ℹ️ Running in automatic mode - no user prompts will be shown")
 
-    logger.info(f"Running in {process_mode} processing mode")
+    print(f"{Fore.WHITE}Using processing mode: {Fore.YELLOW}{process_mode}")
 
     success = True
     processed_folders = set()
     processed_files = set()
     
-    # Create temp directory for processing
     temp_dir = os.path.join(download_directory, "!temp_processing")
     if not dry_run:
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir)
+        print(f"{Fore.GREEN}✓ Created temporary processing directory")
 
-    # Walk through directory tree
+    print(f"\n{Fore.CYAN}📂 SCANNING DIRECTORIES...")
+    folder_count = 0
+    
     for root, _, files in os.walk(download_directory):
-        # Skip special folders
         if any(special in root for special in ["!Finished", "!temp_processing", "!temp_extract"]):
             continue
             
-        # Skip directories with no relevant files
         cbz_files = [f for f in files if f.endswith('.cbz')]
         rar_files = [f for f in files if f.endswith('.rar')]
         
         if not cbz_files and not rar_files:
-            logger.debug(f"Skipping directory with no CBZ or RAR files: {root}")
             continue
         
-        # Determine which processing mode to use for this folder
+        folder_count += 1
+        print(f"\n{Fore.WHITE}Processing folder {folder_count}: {Fore.YELLOW}{os.path.basename(root)}")
+        print(f"{Fore.WHITE}  • Found: {Fore.GREEN}{len(cbz_files)} CBZ files, {Fore.GREEN}{len(rar_files)} RAR files")
+        
+        # Auto-detect appropriate processing mode based on content
         folder_process_mode = process_mode
         if process_mode == "auto":
-            # Auto-detect based on content
             folder_process_mode = "bulk" if rar_files else "standard"
-            logger.info(f"Auto-detected mode for {root}: {folder_process_mode}")
+            print(f"{Fore.WHITE}  • Auto-detected mode: {Fore.YELLOW}{folder_process_mode}")
         
-        # Process according to the selected mode
-        processed_file_list = []  # Track which files were processed in this folder
+        processed_file_list = []
         if folder_process_mode == "bulk" and rar_files:
-            # Bulk mode: Process RAR files containing multiple CBZs
             process_result, processed_file_list = process_bulk_archives(root, files, temp_dir, library_path, auto_mode, dry_run)
-            logger.info(f"Bulk processing of {root} {'successful' if process_result else 'failed'}")
         elif cbz_files:
-            # Standard mode: Process individual CBZ files
             process_result, processed_file_list = process_individual_files(root, files, temp_dir, library_path, auto_mode, dry_run)
-            logger.info(f"Standard processing of {root} {'successful' if process_result else 'failed'}")
         else:
-            # No processable files in this folder
-            logger.info(f"No processable files in {root} for mode {folder_process_mode}")
+            print(f"{Fore.YELLOW}  ⚠ No processable files for mode {folder_process_mode}")
             process_result = False
             
-        # Track processed files
-        for processed_file in processed_file_list:
-            processed_files.add(os.path.join(root, processed_file))
+        if processed_file_list:
+            print(f"{Fore.GREEN}  ✓ Processed {len(processed_file_list)} files")
+        else:
+            print(f"{Fore.YELLOW}  ⚠ No files were processed")
             
-        # Track this folder as processed if appropriate
         if not dry_run and root != download_directory and process_result:
-            logger.info(f"Marking folder for completion: {root}")
             processed_folders.add(root)
-        
-    # After processing all files, move completed folders to !Finished
+    
+    # Show summary and move processed folders to !Finished
     if not dry_run:
-        finished_dir = os.path.join(download_directory, "!Finished")
-        os.makedirs(finished_dir, exist_ok=True)
+        print(f"\n{Fore.CYAN}{'='*60}")
+        print(f"{Fore.CYAN}📊 PROCESSING SUMMARY")
+        print(f"{Fore.CYAN}{'='*60}")
         
-        # Move processed folders
-        logger.info(f"Moving {len(processed_folders)} folders to !Finished")
-        for folder in processed_folders:
-            folder_name = os.path.basename(folder)
-            dest_path = os.path.join(finished_dir, folder_name)
-            try:
-                if os.path.exists(folder):
-                    logger.info(f"Moving folder to !Finished: {folder}")
-                    shutil.move(folder, dest_path)
-                    logger.info(f"Moved completed folder '{folder_name}' to !Finished")
-                else:
-                    logger.warning(f"Folder no longer exists, can't move to !Finished: {folder}")
-            except Exception as e:
-                logger.error(f"Error moving folder '{folder_name}' to !Finished: {str(e)}")
+        print(f"\n{Fore.WHITE}• Processed {Fore.GREEN}{len(processed_files)} files")
+        print(f"{Fore.WHITE}• Completed {Fore.GREEN}{len(processed_folders)} folders")
         
-        # Move processed files that are directly in the download directory
-        root_processed_files = [f for f in processed_files if os.path.dirname(f) == download_directory]
-        if root_processed_files:
-            logger.info(f"Moving {len(root_processed_files)} files from root directory to !Finished")
-            for file_path in root_processed_files:
-                if os.path.exists(file_path):
-                    file_name = os.path.basename(file_path)
-                    dest_path = os.path.join(finished_dir, file_name)
-                    try:
-                        logger.info(f"Moving file to !Finished: {file_name}")
-                        shutil.move(file_path, dest_path)
-                    except Exception as e:
-                        logger.error(f"Error moving file '{file_name}' to !Finished: {str(e)}")
+        if processed_folders:
+            print(f"\n{Fore.CYAN}🏁 MOVING COMPLETED FOLDERS")
+            finished_dir = os.path.join(download_directory, "!Finished")
+            os.makedirs(finished_dir, exist_ok=True)
+            
+            for folder in processed_folders:
+                folder_name = os.path.basename(folder)
+                dest_path = os.path.join(finished_dir, folder_name)
+                try:
+                    if os.path.exists(folder):
+                        print(f"{Fore.GREEN}✓ Moving: {folder_name} → !Finished/")
+                        shutil.move(folder, dest_path)
+                    else:
+                        print(f"{Fore.YELLOW}⚠ Folder no longer exists: {folder_name}")
+                except Exception as e:
+                    print(f"{Fore.RED}✘ Error moving folder {folder_name}: {str(e)}")
+    else:
+        print(f"\n{Fore.YELLOW}📋 DRY RUN COMPLETED - No files were modified")
 
-    # Final cleanup
     if not dry_run and os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
+        print(f"{Fore.GREEN}✓ Cleaned up temporary files")
 
-    if dry_run:
-        print("\n✅ Dry run completed. No files were modified.")
-
+    print(f"\n{Fore.GREEN}{'='*60}")
+    print(f"{Fore.GREEN}✅ PROCESSING COMPLETE")
+    print(f"{Fore.GREEN}{'='*60}")
+    
     return success
 
 def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry_run):
@@ -574,18 +555,16 @@ def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry
     cbz_files = [f for f in files if f.endswith('.cbz')]
     
     if not cbz_files:
-        logger.info(f"No CBZ files found to process in {root}")
-        return False  # not successful
+        return False, []
     
     if dry_run:
-        print(f"\n📁 Found {len(cbz_files)} CBZ files in {root} (standard mode)")
+        print(f"{Fore.WHITE}  • Would process {Fore.YELLOW}{len(cbz_files)} CBZ files {Fore.WHITE}(standard mode)")
         for cbz_file in cbz_files:
             filename = cbz_file
             try:
                 match_type, match_dict = match_best_pattern(filename, auto_mode)
-                print(f"\n📄 Analyzing: {filename}")
-                print(f"  📋 Match type: {match_type}")
-                print(f"  📋 Match data: {match_dict}")
+                print(f"\n{Fore.WHITE}    📄 Analyzing: {Fore.YELLOW}{filename}")
+                print(f"{Fore.WHITE}    📋 Match type: {Fore.CYAN}{match_type}")
                 
                 if match_dict:
                     series = match_dict.get('Title') or match_dict.get('Series')
@@ -596,17 +575,16 @@ def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry
                         file_name += f" v{match_dict.get('Volume')}"
                     if match_dict.get('Chapter'):
                         file_name += f" - Chapter {match_dict.get('Chapter')}"
-                    file_name += ".cbz"  # Add the file extension
+                    file_name += ".cbz"
                     
                     dest_path = os.path.join(destination, file_name)
-                    print(f"  ➡️  Would move to: {dest_path}")
+                    print(f"{Fore.WHITE}    ➡️  Would move to: {Fore.GREEN}{dest_path}")
                     
-                    # Check for potential conflicts
                     if os.path.exists(destination) and os.path.exists(dest_path):
-                        print(f"  ⚠️  WARNING: File already exists at destination")
+                        print(f"{Fore.YELLOW}    ⚠️  File already exists at destination")
             except Exception as e:
-                print(f"  ❌ Error analyzing {filename}: {str(e)}")
-        return True
+                print(f"{Fore.RED}    ❌ Error analyzing {filename}: {str(e)}")
+        return True, []
     
     success = True
     files_processed = False
@@ -618,30 +596,30 @@ def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry
         try:
             match_result = match_best_pattern(filename, auto_mode)
             if match_result is None:
-                logger.warning(f"Skipping file with no match: {filename}")
+                print(f"{Fore.YELLOW}    ⚠ Skipping: {filename} (no match)")
                 continue
                 
             match_type, match_dict = match_result
             
-            logger.info(f"\nProcessing: {filename}")
-            logger.info(f"Match Type: {match_type}")
-            logger.info(f"Match: {match_dict}")
-
+            print(f"{Fore.WHITE}    📄 Processing: {Fore.YELLOW}{filename}")
+            
             if not match_dict or (not match_dict.get('Title') and not match_dict.get('Series')):
-                logger.warning(f"Could not determine series for {filename}")
+                print(f"{Fore.RED}    ❌ Could not determine series")
                 continue
 
             # Process the CBZ file
             result = process_cbz_file(filepath, temp_dir, library_path, match_dict)
             if result:
-                files_processed = True  # Mark at least one file as processed
-                processed_files.append(file)  # Add to list of processed files
+                files_processed = True
+                processed_files.append(file)
+                print(f"{Fore.GREEN}    ✓ Successfully processed")
+            else:
+                print(f"{Fore.RED}    ✘ Processing failed")
             success = success and result
         except Exception as e:
-            logger.error(f"Error processing {filepath}: {str(e)}")
+            print(f"{Fore.RED}    ❌ Error processing {filename}: {str(e)}")
             success = False
     
-    # Only return success if we actually processed files
     return success and files_processed, processed_files
 
 def process_bulk_archives(root, files, temp_dir, library_path, auto_mode, dry_run):
@@ -715,15 +693,14 @@ def process_bulk_archives(root, files, temp_dir, library_path, auto_mode, dry_ru
 
     return success and files_processed, processed_files
 
-def process_cbz_file(filepath, temp_dir, library_path, match_dict):
-    """Process a single CBZ file."""
+def convert_to_webp(source_filepath, temp_dir):
+    """Convert images in a CBZ file to WebP format and create a new CBZ."""
     try:
-        with zipfile.ZipFile(filepath, 'r') as zip_ref:
+        with zipfile.ZipFile(source_filepath, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
-
-        new_filepath = os.path.join(temp_dir, os.path.basename(filepath).replace('.cbz', '_webp.cbz'))
+        
+        new_filepath = os.path.join(temp_dir, os.path.basename(source_filepath).replace('.cbz', '_webp.cbz'))
         with zipfile.ZipFile(new_filepath, 'w') as new_zip:
-            # Convert images to WebP
             def convert_image(img_path):
                 with Image.open(img_path) as img:
                     webp_path = os.path.splitext(img_path)[0] + '.webp'
@@ -736,19 +713,68 @@ def process_cbz_file(filepath, temp_dir, library_path, match_dict):
                     if f.lower().endswith(('.jpg', '.jpeg', '.png')):
                         image_files.append(os.path.join(temp_dir, f))
 
-            with ThreadPoolExecutor() as executor:
-                futures = [executor.submit(convert_image, img_path) for img_path in image_files]
-                for future in tqdm(as_completed(futures), total=len(image_files), desc="Converting to WebP"):
-                    webp_path = future.result()
-                    new_zip.write(webp_path, os.path.basename(webp_path))
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(bar_width=40),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn()
+            ) as progress:
+                convert_task = progress.add_task("Converting images to WebP", total=len(image_files))
+                
+                with ThreadPoolExecutor() as executor:
+                    futures = [executor.submit(convert_image, img_path) for img_path in image_files]
+                    for future in as_completed(futures):
+                        webp_path = future.result()
+                        new_zip.write(webp_path, os.path.basename(webp_path))
+                        progress.update(convert_task, advance=1)
+                    
+        return new_filepath
+    except Exception as e:
+        logger.error(f"Error converting to WebP: {str(e)}")
+        return None
 
-        # Move processed file to library
-        move_to_library(new_filepath, library_path,
-                      match_dict.get('Title') or match_dict.get('Series'),
-                      match_dict.get('Volume'),
-                      match_dict.get('Chapter'))
+def process_cbz_file(filepath, temp_dir, library_path, match_dict):
+    """Process a single CBZ file."""
+    try:
+        original_size = os.path.getsize(filepath)
+        print(f"{Fore.WHITE}      • Original size: {Fore.YELLOW}{original_size / (1024*1024):.2f} MB")
 
-        # Clean up temp files
+        print(f"{Fore.WHITE}      • Converting to WebP...")
+        new_filepath = convert_to_webp(filepath, temp_dir)
+        
+        if not new_filepath or not os.path.exists(new_filepath):
+            print(f"{Fore.YELLOW}      ⚠ WebP conversion failed, using original file")
+            file_to_move = filepath
+        else:
+            new_size = os.path.getsize(new_filepath)
+            print(f"{Fore.WHITE}      • WebP size: {Fore.YELLOW}{new_size / (1024*1024):.2f} MB")
+            
+            if new_size < original_size:
+                size_reduction = ((original_size - new_size) / original_size) * 100
+                print(f"{Fore.GREEN}      ✓ Size reduced by {size_reduction:.1f}%")
+                file_to_move = new_filepath
+            else:
+                print(f"{Fore.YELLOW}      ⚠ WebP increased file size, using original")
+                file_to_move = os.path.join(temp_dir, os.path.basename(filepath))
+                shutil.copy2(filepath, file_to_move)
+
+        series = match_dict.get('Title') or match_dict.get('Series')
+        volume = match_dict.get('Volume')
+        chapter = match_dict.get('Chapter')
+        
+        dest_info = f"{series}"
+        if volume:
+            dest_info += f" v{volume}"
+        if chapter:
+            dest_info += f" - Chapter {chapter}"
+            
+        print(f"{Fore.WHITE}      • Moving to library: {Fore.GREEN}{dest_info}")
+
+        move_to_library(file_to_move, library_path, series, volume, chapter)
+        print(f"{Fore.GREEN}      ✓ File moved successfully")
+
         for item in os.listdir(temp_dir):
             item_path = os.path.join(temp_dir, item)
             if os.path.isfile(item_path):
@@ -756,7 +782,7 @@ def process_cbz_file(filepath, temp_dir, library_path, match_dict):
 
         return True
     except Exception as e:
-        logger.error(f"Error in process_cbz_file: {str(e)}")
+        print(f"{Fore.RED}      ❌ Error: {str(e)}")
         return False
 
 def series_exists(library_path, series_name):
@@ -766,11 +792,9 @@ def series_exists(library_path, series_name):
 def move_to_library(source_file, library_path, series_name, volume=None, chapter=None):
     series_path = os.path.join(library_path, series_name)
 
-    # Create series directory if it doesn't exist
     if not os.path.exists(series_path):
         os.makedirs(series_path)
 
-    # Construct the new file name
     file_name = series_name
     if volume:
         file_name += f" v{volume}"
@@ -780,18 +804,18 @@ def move_to_library(source_file, library_path, series_name, volume=None, chapter
 
     dest_path = os.path.join(series_path, file_name)
 
-    # Check if source is directly in process directory
+    # Check if source is directly in process directory (affects copy vs move behavior)
     source_dir = os.path.dirname(source_file)
     is_root_file = os.path.samefile(source_dir, os.path.dirname(os.path.abspath(source_file)))
 
-    # Handle file already exists case
     if os.path.exists(dest_path):
-        # Replace existing file with the (F) or (F1)-(F9) version
+        # Handle file already exists cases
         if re.search(r'\(F\d?\)', os.path.basename(source_file)):
             os.remove(dest_path)
             shutil.move(source_file, dest_path)
             logger.warning(f"Overwriting {dest_path} with {source_file} as it is a fixed version")
         else:
+            # Move to conflicts folder with unique name
             conflicts_path = os.path.join(download_directory, "!Conflicts")
             if not os.path.exists(conflicts_path):
                 os.makedirs(conflicts_path)
@@ -804,7 +828,7 @@ def move_to_library(source_file, library_path, series_name, volume=None, chapter
                 counter += 1
             dest_path = conflict_dest_path
     
-    # Copy or move the file based on location
+    # Copy from root directory, move from subdirectories
     if is_root_file:
         shutil.copy2(source_file, dest_path)
         logger.info(f"Copied {source_file} to {dest_path}")
@@ -814,10 +838,12 @@ def move_to_library(source_file, library_path, series_name, volume=None, chapter
 
 def test_patterns(test_files):
     """Test pattern matching against sample filenames"""
-    print("\n=== PATTERN TESTING ===")
+    print(f"\n{Fore.CYAN}{'='*60}")
+    print(f"{Fore.CYAN}🧪 PATTERN TESTING")
+    print(f"{Fore.CYAN}{'='*60}")
     
-    for filename in test_files:
-        print(f"\nTesting: {filename}")
+    for i, filename in enumerate(test_files, 1):
+        print(f"\n{Fore.WHITE}Testing file {i}/{len(test_files)}: {Fore.YELLOW}{filename}")
         
         # Try all patterns
         matches = []
@@ -835,12 +861,14 @@ def test_patterns(test_files):
         positive_matches = [m for m in matches if m[2] > 0]
         
         if not positive_matches:
-            print("  ❌ No matches found")
+            print(f"{Fore.RED}  ❌ No matches found")
         else:
-            print(f"  ✓ Found {len(positive_matches)} positive matches:")
+            print(f"{Fore.GREEN}  ✓ Found {len(positive_matches)} positive matches:")
             for i, (pattern_name, match_dict, score) in enumerate(positive_matches):
-                print(f"  {i+1}. {pattern_name} (Score: {score})")
-                print(f"     {match_dict}")
+                print(f"  {i+1}. {Fore.BLUE}{pattern_name} {Fore.WHITE}(Score: {Fore.GREEN}{score}{Fore.WHITE})")
+                for key, value in match_dict.items():
+                    if key != '_pattern_name':
+                        print(f"     {Fore.YELLOW}{key}: {Fore.WHITE}{value}")
             
             # Show example of how this would be processed
             if positive_matches:
@@ -849,28 +877,156 @@ def test_patterns(test_files):
                 volume = best_match[1].get('Volume')
                 chapter = best_match[1].get('Chapter')
                 
-                print("\n  📝 Processing result would be:")
-                print(f"     Series: {series}")
+                print(f"\n  {Fore.CYAN}📝 Processing result would be:")
+                print(f"     {Fore.WHITE}Series: {Fore.GREEN}{series}")
                 if volume:
-                    print(f"     Volume: {volume}")
+                    print(f"     {Fore.WHITE}Volume: {Fore.GREEN}{volume}")
                 if chapter:
-                    print(f"     Chapter: {chapter}")
+                    print(f"     {Fore.WHITE}Chapter: {Fore.GREEN}{chapter}")
     
-    print("\n=== TESTING COMPLETE ===")
+    print(f"\n{Fore.GREEN}{'='*60}")
+    print(f"{Fore.GREEN}✅ TESTING COMPLETE")
+    print(f"{Fore.GREEN}{'='*60}")
 
 def get_library_path():
+    """Get and validate the comic library path with enhanced UI."""
+    print(f"\n{Fore.CYAN}{'='*60}")
+    print(f"{Fore.CYAN}📚 COMIC LIBRARY LOCATION")
+    print(f"{Fore.CYAN}{'='*60}")
+    
+    print(f"\n{Fore.WHITE}This is where your organized comics will be stored.")
+    print(f"{Fore.WHITE}Each series will get its own folder within this location.")
+    
+    print(f"\n{Fore.YELLOW}Examples: ")
+    print(f"{Fore.YELLOW}  • C:\\Comics\\Library")
+    print(f"{Fore.YELLOW}  • D:\\Media\\Comics")
+    
     while True:
-        library_path = input("Enter your comic library path: ")
+        print()
+        library_path = input(f"{Fore.GREEN}➤ Enter your comic library path: {Fore.WHITE}")
+        
+        if not library_path.strip():
+            print(f"{Fore.RED}✘ Path cannot be empty. Please enter a valid directory.")
+            continue
+            
         if os.path.exists(library_path):
+            print(f"{Fore.GREEN}✓ Path verified!")
             return library_path
-        print(f"Error: Path '{library_path}' does not exist")
+            
+        print(f"{Fore.RED}✘ Path '{library_path}' doesn't exist.")
+        create_option = input(f"{Fore.YELLOW}Would you like to create this directory? (y/n): {Fore.WHITE}")
+        
+        if create_option.lower() == 'y':
+            try:
+                os.makedirs(library_path)
+                print(f"{Fore.GREEN}✓ Directory created successfully!")
+                return library_path
+            except Exception as e:
+                print(f"{Fore.RED}✘ Error creating directory: {str(e)}")
 
 def get_download_directory():
+    """Get and validate the download directory with enhanced UI."""
+    print(f"\n{Fore.CYAN}{'='*60}")
+    print(f"{Fore.CYAN}📥 DOWNLOADS LOCATION")
+    print(f"{Fore.CYAN}{'='*60}")
+    
+    print(f"\n{Fore.WHITE}This is where your unprocessed comic downloads are located.")
+    print(f"{Fore.WHITE}The script will search this folder and all its subfolders for CBZ/RAR files.")
+    
+    print(f"\n{Fore.YELLOW}Examples: ")
+    print(f"{Fore.YELLOW}  • C:\\Downloads\\Comics")
+    print(f"{Fore.YELLOW}  • D:\\Torrents\\Completed")
+    
     while True:
-        download_directory = input("Enter the directory path with raw downloads to process: ")
+        print()
+        download_directory = input(f"{Fore.GREEN}➤ Enter the directory with raw downloads to process: {Fore.WHITE}")
+        
+        if not download_directory.strip():
+            print(f"{Fore.RED}✘ Path cannot be empty. Please enter a valid directory.")
+            continue
+            
         if os.path.exists(download_directory):
+            # Count files in root directory
+            root_files = sum(1 for f in os.listdir(download_directory) 
+                         if os.path.isfile(os.path.join(download_directory, f)) 
+                         and f.lower().endswith(('.cbz', '.rar')))
+            
+            # Count files in all subdirectories
+            subdir_files = 0
+            for root, _, files in os.walk(download_directory):
+                if any(special in root for special in ["!Finished", "!temp_processing", "!temp_extract"]):
+                    continue
+                subdir_files += sum(1 for f in files if f.lower().endswith(('.cbz', '.rar')))
+            
+            # Subtract root files to avoid double-counting
+            subdir_files -= root_files
+            
+            print(f"{Fore.GREEN}✓ Path verified! Found:")
+            print(f"{Fore.GREEN}  • {root_files} files in root directory")
+            print(f"{Fore.GREEN}  • {subdir_files} files in subdirectories")
+            
+            if root_files == 0 and subdir_files == 0:
+                print(f"{Fore.YELLOW}⚠ Warning: No CBZ or RAR files found in this location or its subdirectories.")
+                proceed = input(f"{Fore.YELLOW}Continue anyway? (y/n): {Fore.WHITE}").strip().lower()
+                if proceed != 'y':
+                    continue
+            
             return download_directory
-        print(f"Error: Directory '{download_directory}' does not exist")
+            
+        print(f"{Fore.RED}✘ Directory '{download_directory}' doesn't exist.")
+
+def confirm_processing(download_directory, library_path, dry_run=False, process_mode="auto"):
+    """Show a summary of the operation and ask for confirmation before proceeding."""
+    print(f"\n{Fore.CYAN}{'='*60}")
+    print(f"{Fore.CYAN}💼 OPERATION SUMMARY")
+    print(f"{Fore.CYAN}{'='*60}")
+    
+    # Count files to be processed
+    root_files = sum(1 for f in os.listdir(download_directory) 
+                  if os.path.isfile(os.path.join(download_directory, f)) 
+                  and f.lower().endswith(('.cbz', '.rar')))
+    
+    # Count files in all subdirectories
+    subdir_files = 0
+    for root, _, files in os.walk(download_directory):
+        if any(special in root for special in ["!Finished", "!temp_processing", "!temp_extract"]):
+            continue
+        subdir_files += sum(1 for f in files if f.lower().endswith(('.cbz', '.rar')))
+    
+    # Subtract root files to avoid double-counting
+    subdir_files -= root_files
+    
+    # Determine the operation mode description
+    mode_desc = {
+        "auto": "Automatic (detect best method based on content)",
+        "standard": "Standard (process individual CBZ files)",
+        "bulk": "Bulk (extract and process RAR archives)",
+        "nested": "Nested (process folder hierarchies)"
+    }.get(process_mode, "Unknown")
+    
+    print(f"\n{Fore.WHITE}The script will now:")
+    print(f"{Fore.WHITE}1. Search for comic files in {Fore.YELLOW}{download_directory}")
+    print(f"{Fore.WHITE}2. Process {Fore.YELLOW}{root_files + subdir_files} files {Fore.WHITE}({root_files} in root, {subdir_files} in subfolders)")
+    print(f"{Fore.WHITE}3. Organize them into {Fore.YELLOW}{library_path}")
+    print(f"{Fore.WHITE}4. Use processing mode: {Fore.YELLOW}{mode_desc}")
+    
+    if dry_run:
+        print(f"\n{Fore.YELLOW}⚠ DRY RUN MODE: No files will be modified")
+    
+    print(f"\n{Fore.WHITE}During processing:")
+    print(f"{Fore.WHITE}• Files will be converted to WebP format when beneficial")
+    print(f"{Fore.WHITE}• Series folders will be created automatically")
+    print(f"{Fore.WHITE}• Processed folders will move to !Finished directory")
+    
+    while True:
+        proceed = input(f"\n{Fore.GREEN}➤ Continue with processing? (y/n): {Fore.WHITE}").strip().lower()
+        if proceed == 'y':
+            return True
+        elif proceed == 'n':
+            print(f"{Fore.YELLOW}Operation canceled by user.")
+            return False
+        else:
+            print(f"{Fore.RED}Please enter 'y' to continue or 'n' to cancel.")
 
 def parse_arguments():
     """Parse command line arguments"""
@@ -918,5 +1074,10 @@ if __name__ == '__main__':
 
     library_path = args.dest if args.dest else get_library_path()
     download_directory = args.source if args.source else get_download_directory()
+
+    if not args.auto:
+        if not confirm_processing(download_directory, library_path, args.dry_run, args.mode):
+            print(f"{Fore.YELLOW}Exiting without processing.")
+            exit(0)
 
     process_directory(download_directory, library_path, dry_run=args.dry_run, auto_mode=args.auto, process_mode=args.mode)
