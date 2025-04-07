@@ -19,12 +19,13 @@ python Manga_Download_Processor.py [options]
 Arguments:
 ---------
   --dry-run, -d       Test pattern matching without moving files
-  --test, -t          Run pattern tests on sample filenames
+  --test-pattern, -tp Run pattern tests on sample filenames
   --auto, -a          Run in automatic mode without user prompts (for scheduled jobs)
   --source, -s DIR    Source directory with raw downloads to process
   --dest, -l DIR      Destination library path for processed files
   --work-dir, -w DIR  Work directory where processing occurs
   --mode, -m MODE     Processing mode: standard, bulk, nested, or auto (default)
+  --threads, -t #     Maximum number of threads for image conversion (0=auto, default: 50% of CPU cores)
   
 Examples:
 --------
@@ -95,6 +96,7 @@ python c:/path/to/Manga_Download_Processor.py --auto --source "D:/Downloads/Mang
 0 3 * * * /usr/bin/python3 /path/to/Manga_Download_Processor.py --auto --source /path/to/downloads --dest /path/to/library >> /path/to/log_file.log 2>&1
 """
 
+
 import os
 import logging
 from logging.handlers import TimedRotatingFileHandler
@@ -113,11 +115,12 @@ import os.path
 import uuid
 import string
 import random
-
+import sys
 
 init(autoreset=True)
 
 patterns = [
+    ('FullTitle_Year', re.compile(r'^(?P<Series>.+?)\s\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))*')),
     ('Complete_Series', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d+(?:\.\d+)?)\s+\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))*')),
     ('Complex_Series', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3})\s+\((?P<Year>\d{4})\)')),
     ('Complex_SeriesDecimal', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3}(?:\.\d+)?)\s+\((?P<Year>\d{4})\)')),
@@ -220,6 +223,10 @@ def score_match(match_dict, filename):
     if not validate_match(match_dict):
         return 0
 
+    # Clean the filename for comparison purposes
+    clean_filename = os.path.splitext(filename)[0]
+    clean_filename = re.sub(r'\s+\(\d{4}\).*$', '', clean_filename)  # Remove year and anything after
+
     # Boost specific reliable patterns
     pattern_name = getattr(match_dict, '_pattern_name', None)
 
@@ -237,6 +244,8 @@ def score_match(match_dict, filename):
             
             # Quality checks for specific fields
             if key in ('Series', 'Title'):
+                series_value = value.strip()
+
                 if len(value.strip()) >= SERIES_MIN_LENGTH:
                     score += min(len(value.strip()) / 10, 3)
                 else:
@@ -250,7 +259,25 @@ def score_match(match_dict, filename):
                 
                 if value.strip().endswith(("-", ":", ".")):
                     score -= 8 
-                    
+                
+                # Check if series name is too short compared to filename
+                if len(series_value) < len(clean_filename) * 0.3:  # Series less than 30% of filename length
+                    score -= 8
+                
+                # Check for single word series from multi-word filename
+                filename_words = len(re.findall(r'\b\w+\b', clean_filename))
+                series_words = len(re.findall(r'\b\w+\b', series_value))
+                if series_words == 1 and filename_words >= 3:
+                    score -= 10
+                
+                # Check word overlap between filename and series
+                if filename_words >= 3:  # Only check for multi-word titles
+                    filename_word_set = set(w.lower() for w in re.findall(r'\b\w+\b', clean_filename))
+                    series_word_set = set(w.lower() for w in re.findall(r'\b\w+\b', series_value))
+                    common_words = filename_word_set.intersection(series_word_set)
+                    if len(common_words) < len(filename_word_set) * 0.3:  # Less than 30% word overlap
+                        score -= 8
+
             elif key == 'Chapter':
                 try:
                     ch_num = float(value.strip())
@@ -427,7 +454,7 @@ def extract_rars(folder_path, work_directory):
             
     return extracted_folders, num_extracted
 
-def process_directory(download_directory, library_path, work_directory, dry_run=False, auto_mode=False, process_mode="standard"):
+def process_directory(download_directory, library_path, work_directory, dry_run=False, auto_mode=False, process_mode="standard", max_threads=0):
     """Process manga files and move completed series folders to !Finished."""
     print(f"\n{Fore.CYAN}{'='*60}")
     print(f"{Fore.CYAN}🚀 PROCESSING COMICS")
@@ -488,9 +515,9 @@ def process_directory(download_directory, library_path, work_directory, dry_run=
         
         processed_file_list = []
         if folder_process_mode == "bulk" and rar_files:
-            process_result, processed_file_list = process_bulk_archives(root, files, work_directory, library_path, auto_mode, dry_run)
+            process_result, processed_file_list = process_bulk_archives(root, files, work_directory, library_path, auto_mode, dry_run, max_threads)
         elif cbz_files:
-            process_result, processed_file_list = process_individual_files(root, files, work_directory, library_path, auto_mode, dry_run)
+            process_result, processed_file_list = process_individual_files(root, files, work_directory, library_path, auto_mode, dry_run, max_threads)
         else:
             print(f"{Fore.YELLOW}  ⚠ No processable files for mode {folder_process_mode}")
             process_result = False
@@ -560,7 +587,7 @@ def process_directory(download_directory, library_path, work_directory, dry_run=
     
     return success
 
-def process_individual_files(root, files, work_directory, library_path, auto_mode, dry_run):
+def process_individual_files(root, files, work_directory, library_path, auto_mode, dry_run, max_threads=0):
     """Process individual CBZ files directly"""
     cbz_files = [f for f in files if f.endswith('.cbz')]
     
@@ -620,7 +647,7 @@ def process_individual_files(root, files, work_directory, library_path, auto_mod
                 continue
 
             # Process the CBZ file
-            result = process_cbz_file(filepath, work_directory, library_path, match_dict)
+            result = process_cbz_file(filepath, work_directory, library_path, match_dict, max_threads)
             if result:
                 files_processed = True
                 processed_files.append(file)
@@ -647,7 +674,7 @@ def process_individual_files(root, files, work_directory, library_path, auto_mod
     
     return success and files_processed, processed_files
 
-def process_bulk_archives(root, files, work_directory, library_path, auto_mode, dry_run):
+def process_bulk_archives(root, files, work_directory, library_path, auto_mode, dry_run, max_threads=0):
     """Process RAR files containing multiple CBZs"""
     rar_files = [f for f in files if f.endswith('.rar')]
     
@@ -697,7 +724,7 @@ def process_bulk_archives(root, files, work_directory, library_path, auto_mode, 
                         continue
 
                     # Process extracted CBZ file
-                    result = process_cbz_file(filepath, work_directory, library_path, match_dict)
+                    result = process_cbz_file(filepath, work_directory, library_path, match_dict, max_threads)
                     success = success and result
                 except Exception as e:
                     logger.error(f"Error processing extracted file {filepath}: {str(e)}")
@@ -715,7 +742,7 @@ def process_bulk_archives(root, files, work_directory, library_path, auto_mode, 
 
     return success and files_processed, processed_files
 
-def convert_to_webp(source_filepath, temp_dir):
+def convert_to_webp(source_filepath, temp_dir, max_threads=0):
     """Convert images in a CBZ file to WebP format and create a new CBZ."""
     try:
         with zipfile.ZipFile(source_filepath, 'r') as zip_ref:
@@ -734,6 +761,16 @@ def convert_to_webp(source_filepath, temp_dir):
                 for f in temp_files:
                     if f.lower().endswith(('.jpg', '.jpeg', '.png')):
                         image_files.append(os.path.join(temp_dir, f))
+            
+            if max_threads <= 0:
+                # Default to 50% of available cores (but at least 1)
+                import multiprocessing
+                cpu_count = multiprocessing.cpu_count()
+                max_workers = max(1, cpu_count // 2)
+                logger.info(f"Auto-configured thread count: {max_workers} (50% of {cpu_count} cores)")
+            else:
+                max_workers = max_threads
+                logger.info(f"Using user-specified thread count: {max_workers}")
 
             with Progress(
                 SpinnerColumn(),
@@ -745,7 +782,7 @@ def convert_to_webp(source_filepath, temp_dir):
             ) as progress:
                 convert_task = progress.add_task("Converting images to WebP", total=len(image_files))
                 
-                with ThreadPoolExecutor() as executor:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = [executor.submit(convert_image, img_path) for img_path in image_files]
                     for future in as_completed(futures):
                         webp_path = future.result()
@@ -757,7 +794,7 @@ def convert_to_webp(source_filepath, temp_dir):
         logger.error(f"Error converting to WebP: {str(e)}")
         return None
 
-def process_cbz_file(filepath, work_dir, library_path, match_dict):
+def process_cbz_file(filepath, work_dir, library_path, match_dict, max_threads=0):
     """Process a single CBZ file with isolated temp directory."""
     try:
         # Create a unique subfolder for this file
@@ -773,7 +810,7 @@ def process_cbz_file(filepath, work_dir, library_path, match_dict):
         print(f"{Fore.WHITE}      • Original size: {Fore.YELLOW}{original_size / (1024*1024):.2f} MB")
 
         print(f"{Fore.WHITE}      • Converting to WebP...")
-        new_filepath = convert_to_webp(filepath, file_temp_dir)
+        new_filepath = convert_to_webp(filepath, file_temp_dir, max_threads)
         
         if not new_filepath or not os.path.exists(new_filepath):
             print(f"{Fore.YELLOW}      ⚠ WebP conversion failed, using original file")
@@ -837,7 +874,7 @@ def series_exists(library_path, series_name):
     series_path = os.path.join(library_path, series_name)
     return os.path.exists(series_path)
 
-def move_to_library(source_file, library_path, series_name, volume=None, chapter=None):
+def move_to_library(source_file, library_path, series_name, volume=None, chapter=None, download_directory=None):
     series_path = os.path.join(library_path, series_name)
 
     if not os.path.exists(series_path):
@@ -862,7 +899,7 @@ def move_to_library(source_file, library_path, series_name, volume=None, chapter
             os.remove(dest_path)
             shutil.move(source_file, dest_path)
             logger.warning(f"Overwriting {dest_path} with {source_file} as it is a fixed version")
-        else:
+        elif download_directory:  # Only use if provided
             # Move to conflicts folder with unique name
             conflicts_path = os.path.join(download_directory, "!Conflicts")
             if not os.path.exists(conflicts_path):
@@ -875,6 +912,13 @@ def move_to_library(source_file, library_path, series_name, volume=None, chapter
                 logger.warning(f"Conflict: {file_name} already exists. Moving to {conflict_dest_path}")
                 counter += 1
             dest_path = conflict_dest_path
+        else:
+            base, ext = os.path.splitext(dest_path)
+            counter = 1
+            while os.path.exists(dest_path):
+                dest_path = f"{base}_{counter}{ext}"
+                counter += 1
+            logger.warning(f"Conflict: File already exists. Saving as: {dest_path}")
     
     # Copy from root directory, move from subdirectories
     if is_root_file:
@@ -1164,7 +1208,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Manga Unpacker and Library Manager")
     parser.add_argument("--dry-run", "-d", action="store_true", 
                         help="Test pattern matching without moving files")
-    parser.add_argument("--test", "-t", action="store_true",
+    parser.add_argument("--test-pattern", "-tp", action="store_true",
                         help="Run pattern tests on sample filenames")
     parser.add_argument("--auto", "-a", action="store_true",
                         help="Run in automatic mode without user prompts (for scheduled jobs)")
@@ -1173,17 +1217,72 @@ def parse_arguments():
     parser.add_argument("--dest", "-l", type=str, metavar="DIR",
                         help="Destination library path for processed files")
     parser.add_argument("filenames", nargs="*", 
-                        help="Optional filenames to test (only used with --test)")
+                        help="Optional filenames to test (only used with --test-pattern)")
     parser.add_argument("--mode", "-m", type=str, choices=["standard", "bulk", "nested", "auto"], default="auto",
                         help="Processing mode: standard (individual files), bulk (archives containing multiple CBZs), "
                              "nested (folders of archives), auto (detect based on content)")
     parser.add_argument("--work-dir", "-w", type=str, metavar="DIR",
                         help="Work directory for temporary processing (with plenty of free space)")
+    parser.add_argument("--threads", "-t", type=int, default=0, 
+                        help="Maximum number of threads for image conversion (0=auto, default: 50% of CPU cores)")
     return parser.parse_args()
+
+
+def check_dependencies():
+    """Check for required dependencies and libraries"""
+    missing_deps = []
+    
+    # Check unrar
+    unrar_path = shutil.which("unrar")
+    if unrar_path is None:
+        error_msg = "ERROR: 'unrar' is not installed or not found in the system path."
+        missing_deps.append(error_msg)
+        print(f"{Fore.RED}✘ {error_msg}", file=sys.stderr)
+        
+    # Check Python libraries
+    required_libs = [
+        ("zipfile", "Standard library"),
+        ("PIL.Image", "Pillow"),
+        ("concurrent.futures", "Standard library"),
+        ("rich.progress", "rich")
+    ]
+    
+    for lib, package in required_libs:
+        try:
+            __import__(lib)
+        except ImportError:
+            error_msg = f"ERROR: Missing required library: {lib} (from package '{package}')"
+            missing_deps.append(error_msg)
+            print(f"{Fore.RED}✘ {error_msg}", file=sys.stderr)
+    
+    # If any deps are missing, write to log file and exit
+    if missing_deps:
+        try:
+            # Write plain text version to a dedicated file for service managers
+            with open("dependency_check_failed.log", "w") as f:
+                f.write("Comic Manager dependency check failed\n")
+                f.write("=====================================\n")
+                f.write("\n".join(missing_deps))
+                f.write("\n\nPlease install required dependencies and try again.")
+            
+            # Also log to the regular log file
+            logger.error("Dependency check failed: " + ", ".join(missing_deps))
+        except Exception as e:
+            print(f"Failed to write dependency error log: {e}", file=sys.stderr)
+            
+        print(f"{Fore.YELLOW}Please install the required libraries and try again.", file=sys.stderr)
+        exit(1)
+    else:
+        print(f"{Fore.GREEN}✓ All dependencies are installed.")
+
 
 if __name__ == '__main__':
     logger = setup_logging()
     args = parse_arguments()
+    
+    # Dependency check at startup
+    check_dependencies()
+
 
     if args.test:
         if args.filenames:
@@ -1209,12 +1308,9 @@ if __name__ == '__main__':
     download_directory = args.source if args.source else get_download_directory()
     work_directory = args.work_dir if args.work_dir else get_work_directory()
 
-    # Clean work directory at startup
-    clean_work_directory(work_directory)
-
     if not args.auto:
         if not confirm_processing(download_directory, library_path, work_directory,args.dry_run, args.mode):
             print(f"{Fore.YELLOW}Exiting without processing.")
             exit(0)
 
-    process_directory(download_directory, library_path, work_directory, dry_run=args.dry_run, auto_mode=args.auto, process_mode=args.mode)
+    process_directory(download_directory, library_path, work_directory, dry_run=args.dry_run, auto_mode=args.auto, process_mode=args.mode, max_threads=args.threads)
