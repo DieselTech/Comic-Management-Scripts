@@ -23,6 +23,7 @@ Arguments:
   --auto, -a          Run in automatic mode without user prompts (for scheduled jobs)
   --source, -s DIR    Source directory with raw downloads to process
   --dest, -l DIR      Destination library path for processed files
+  --work-dir, -w DIR  Work directory where processing occurs
   --mode, -m MODE     Processing mode: standard, bulk, nested, or auto (default)
   
 Examples:
@@ -107,6 +108,11 @@ from PIL import Image
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from colorama import init, Fore, Back, Style
+import tempfile
+import os.path
+import uuid
+import string
+import random
 
 
 init(autoreset=True)
@@ -397,7 +403,7 @@ def match_best_pattern(filename, auto_mode=False):
     print(f"Skipping file: {filename}")
     return None
 
-def extract_rars(folder_path):
+def extract_rars(folder_path, work_directory):
     """Extract RAR files from a single folder."""
     extracted_folders = []
     num_extracted = 0
@@ -405,7 +411,8 @@ def extract_rars(folder_path):
     for file in os.listdir(folder_path):
         if file.endswith('.rar'):
             rar_path = os.path.join(folder_path, file)
-            folder_name = os.path.join(folder_path, "!temp_extract")
+            # Use the work directory for extraction
+            folder_name = os.path.join(work_directory, "temp_extract", os.path.splitext(file)[0])
             logger.info(f"Creating extraction folder: {folder_name}")
             
             if os.path.exists(folder_name):
@@ -420,34 +427,7 @@ def extract_rars(folder_path):
             
     return extracted_folders, num_extracted
 
-def cleanup_files(temp_dir, filepath, new_filepath, library_path, extracted_folders):
-    """Clean up all temporary files and folders created during conversion."""
-    try:
-        # Log all folders that will be cleaned
-        logger.info("Cleanup starting...")
-        logger.info(f"Temp dir: {temp_dir}")
-        logger.info(f"Extracted folders to clean: {extracted_folders}")
-        
-        if not extracted_folders:
-            logger.info("No extracted folders found for cleanup.")
-        
-        # Clean up temp directory
-        if os.path.exists(temp_dir):
-            logger.info(f"Removing temporary directory: {temp_dir}")
-            shutil.rmtree(temp_dir)
-        
-        # Clean extracted RAR folders
-        for folder in extracted_folders:
-            abs_folder = os.path.abspath(folder)
-            if os.path.exists(abs_folder):
-                logger.info(f"Removing RAR folder: {abs_folder}")
-                shutil.rmtree(abs_folder)
-            else:
-                logger.warning(f"Folder not found: {abs_folder}")
-    except Exception as e:
-        logger.error(f"Error during cleanup: {str(e)}")
-
-def process_directory(download_directory, library_path, dry_run=False, auto_mode=False, process_mode="standard"):
+def process_directory(download_directory, library_path, work_directory, dry_run=False, auto_mode=False, process_mode="standard"):
     """Process manga files and move completed series folders to !Finished."""
     print(f"\n{Fore.CYAN}{'='*60}")
     print(f"{Fore.CYAN}🚀 PROCESSING COMICS")
@@ -460,21 +440,32 @@ def process_directory(download_directory, library_path, dry_run=False, auto_mode
         print(f"{Fore.BLUE}ℹ️ Running in automatic mode - no user prompts will be shown")
 
     print(f"{Fore.WHITE}Using processing mode: {Fore.YELLOW}{process_mode}")
+    print(f"{Fore.WHITE}Using work directory: {Fore.YELLOW}{work_directory}")
 
     success = True
-    processed_folders = set()
-    processed_files = set()
+    processed_files_count = 0
+    processed_folders_count = 0
     
-    temp_dir = os.path.join(download_directory, "!temp_processing")
+    # Create necessary directories in work_directory instead of download_directory
+    temp_processing_dir = os.path.join(work_directory, "temp_processing")
+    temp_extract_dir = os.path.join(work_directory, "temp_extract")
+    
     if not dry_run:
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        os.makedirs(temp_dir)
-        print(f"{Fore.GREEN}✓ Created temporary processing directory")
+        # Create work directory structure
+        os.makedirs(temp_processing_dir, exist_ok=True)
+        os.makedirs(temp_extract_dir, exist_ok=True)
+        print(f"{Fore.GREEN}✓ Created work directory structure")
 
     print(f"\n{Fore.CYAN}📂 SCANNING DIRECTORIES...")
     folder_count = 0
     
+    # Create !Finished directory upfront
+    finished_dir = os.path.join(download_directory, "!Finished")
+    if not dry_run:
+        os.makedirs(finished_dir, exist_ok=True)
+    
+    root_processed_files = []
+
     for root, _, files in os.walk(download_directory):
         if any(special in root for special in ["!Finished", "!temp_processing", "!temp_extract"]):
             continue
@@ -497,51 +488,70 @@ def process_directory(download_directory, library_path, dry_run=False, auto_mode
         
         processed_file_list = []
         if folder_process_mode == "bulk" and rar_files:
-            process_result, processed_file_list = process_bulk_archives(root, files, temp_dir, library_path, auto_mode, dry_run)
+            process_result, processed_file_list = process_bulk_archives(root, files, work_directory, library_path, auto_mode, dry_run)
         elif cbz_files:
-            process_result, processed_file_list = process_individual_files(root, files, temp_dir, library_path, auto_mode, dry_run)
+            process_result, processed_file_list = process_individual_files(root, files, work_directory, library_path, auto_mode, dry_run)
         else:
             print(f"{Fore.YELLOW}  ⚠ No processable files for mode {folder_process_mode}")
             process_result = False
             
         if processed_file_list:
             print(f"{Fore.GREEN}  ✓ Processed {len(processed_file_list)} files")
+            processed_files_count += len(processed_file_list)
+            
+            if root == download_directory:
+                root_processed_files.extend(processed_file_list)
         else:
             print(f"{Fore.YELLOW}  ⚠ No files were processed")
-            
+        
+        # Move the folder to !Finished immediately if it was processed successfully
+        # and it's not the main download directory
         if not dry_run and root != download_directory and process_result:
-            processed_folders.add(root)
+            folder_name = os.path.basename(root)
+            dest_path = os.path.join(finished_dir, folder_name)
+            try:
+                print(f"{Fore.GREEN}  ✓ Moving folder to !Finished: {folder_name}")
+                shutil.move(root, dest_path)
+                processed_folders_count += 1
+                logger.info(f"Moved processed folder to !Finished: {folder_name}")
+            except Exception as e:
+                print(f"{Fore.RED}  ✘ Error moving folder {folder_name}: {str(e)}")
+                logger.error(f"Error moving folder {folder_name} to !Finished: {str(e)}")
+        
+    if not dry_run and root_processed_files:
+        # No more nested subfolder - put files directly in !Finished
+        os.makedirs(finished_dir, exist_ok=True)
+        
+        print(f"\n{Fore.CYAN}📦 Moving processed loose files")
+        for filename in root_processed_files:
+            source_path = os.path.join(download_directory, filename)
+            if os.path.exists(source_path):
+                try:
+                    dest_path = os.path.join(finished_dir, filename)
+                    shutil.move(source_path, dest_path)
+                    print(f"{Fore.GREEN}  ✓ Moved to !Finished: {filename}")
+                    logger.info(f"Moved processed loose file to !Finished: {filename}")
+                except Exception as e:
+                    print(f"{Fore.RED}  ✘ Error moving file {filename}: {str(e)}")
+                    logger.error(f"Error moving loose file {filename}: {str(e)}")
     
-    # Show summary and move processed folders to !Finished
+    # Show summary but don't move folders (they're already moved)
     if not dry_run:
         print(f"\n{Fore.CYAN}{'='*60}")
         print(f"{Fore.CYAN}📊 PROCESSING SUMMARY")
         print(f"{Fore.CYAN}{'='*60}")
         
-        print(f"\n{Fore.WHITE}• Processed {Fore.GREEN}{len(processed_files)} files")
-        print(f"{Fore.WHITE}• Completed {Fore.GREEN}{len(processed_folders)} folders")
-        
-        if processed_folders:
-            print(f"\n{Fore.CYAN}🏁 MOVING COMPLETED FOLDERS")
-            finished_dir = os.path.join(download_directory, "!Finished")
-            os.makedirs(finished_dir, exist_ok=True)
-            
-            for folder in processed_folders:
-                folder_name = os.path.basename(folder)
-                dest_path = os.path.join(finished_dir, folder_name)
-                try:
-                    if os.path.exists(folder):
-                        print(f"{Fore.GREEN}✓ Moving: {folder_name} → !Finished/")
-                        shutil.move(folder, dest_path)
-                    else:
-                        print(f"{Fore.YELLOW}⚠ Folder no longer exists: {folder_name}")
-                except Exception as e:
-                    print(f"{Fore.RED}✘ Error moving folder {folder_name}: {str(e)}")
+        print(f"\n{Fore.WHITE}• Processed {Fore.GREEN}{processed_files_count} files")
+        print(f"{Fore.WHITE}• Completed {Fore.GREEN}{processed_folders_count} folders")
     else:
         print(f"\n{Fore.YELLOW}📋 DRY RUN COMPLETED - No files were modified")
 
-    if not dry_run and os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
+    if not dry_run:
+    # Clean up main processing directories but keep work_directory itself
+        for subdir in ["temp_processing", "temp_extract"]:
+            path = os.path.join(work_directory, subdir)
+            if os.path.exists(path):
+                shutil.rmtree(path)
         print(f"{Fore.GREEN}✓ Cleaned up temporary files")
 
     print(f"\n{Fore.GREEN}{'='*60}")
@@ -550,7 +560,7 @@ def process_directory(download_directory, library_path, dry_run=False, auto_mode
     
     return success
 
-def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry_run):
+def process_individual_files(root, files, work_directory, library_path, auto_mode, dry_run):
     """Process individual CBZ files directly"""
     cbz_files = [f for f in files if f.endswith('.cbz')]
     
@@ -589,6 +599,8 @@ def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry
     success = True
     files_processed = False
     processed_files = []
+
+    finished_dir = os.path.join(os.path.dirname(root), "!Finished")
     
     for file in cbz_files:
         filepath = os.path.join(root, file)
@@ -608,11 +620,24 @@ def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry
                 continue
 
             # Process the CBZ file
-            result = process_cbz_file(filepath, temp_dir, library_path, match_dict)
+            result = process_cbz_file(filepath, work_directory, library_path, match_dict)
             if result:
                 files_processed = True
                 processed_files.append(file)
                 print(f"{Fore.GREEN}    ✓ Successfully processed")
+                
+                # If this is a root directory file, move it to !Finished immediately
+                if root == download_directory and not dry_run:
+                    finished_dir = os.path.join(download_directory, "!Finished")
+                    os.makedirs(finished_dir, exist_ok=True)
+                    dest_path = os.path.join(finished_dir, filename)
+                    try:
+                        shutil.move(filepath, dest_path)
+                        print(f"{Fore.GREEN}    ✓ Moved to !Finished: {filename}")
+                        logger.info(f"Moved processed loose file to !Finished: {filename}")
+                    except Exception as e:
+                        print(f"{Fore.RED}    ✘ Error moving file {filename}: {str(e)}")
+                        logger.error(f"Error moving loose file {filename}: {str(e)}")
             else:
                 print(f"{Fore.RED}    ✘ Processing failed")
             success = success and result
@@ -622,23 +647,24 @@ def process_individual_files(root, files, temp_dir, library_path, auto_mode, dry
     
     return success and files_processed, processed_files
 
-def process_bulk_archives(root, files, temp_dir, library_path, auto_mode, dry_run):
+def process_bulk_archives(root, files, work_directory, library_path, auto_mode, dry_run):
     """Process RAR files containing multiple CBZs"""
     rar_files = [f for f in files if f.endswith('.rar')]
     
     if not rar_files:
         logger.info("No RAR files found to process in bulk mode")
-        return False  # No RAR files to process, not successful
+        return False, []  # No RAR files to process, not successful
     
     if dry_run:
         print(f"\n📁 Found {len(rar_files)} RAR files in {root} (bulk mode)")
         for rar_file in rar_files:
             print(f"  📦 Would extract: {rar_file}")
-        return True
+        return True, []
     
     success = True
     files_processed = False
-    extracted_folders, num_extracted = extract_rars(root)
+    # Fix: Pass the work_directory parameter to extract_rars
+    extracted_folders, num_extracted = extract_rars(root, work_directory)
     
     if num_extracted > 0:
         # Process extracted files
@@ -671,7 +697,7 @@ def process_bulk_archives(root, files, temp_dir, library_path, auto_mode, dry_ru
                         continue
 
                     # Process extracted CBZ file
-                    result = process_cbz_file(filepath, temp_dir, library_path, match_dict)
+                    result = process_cbz_file(filepath, work_directory, library_path, match_dict)
                     success = success and result
                 except Exception as e:
                     logger.error(f"Error processing extracted file {filepath}: {str(e)}")
@@ -681,10 +707,6 @@ def process_bulk_archives(root, files, temp_dir, library_path, auto_mode, dry_ru
         success = False
     
     # Clean up extraction folders
-    for folder in extracted_folders:
-        if os.path.exists(folder):
-            shutil.rmtree(folder)
-    
     processed_files = []
     if not dry_run:
         for file in rar_files:
@@ -735,18 +757,30 @@ def convert_to_webp(source_filepath, temp_dir):
         logger.error(f"Error converting to WebP: {str(e)}")
         return None
 
-def process_cbz_file(filepath, temp_dir, library_path, match_dict):
-    """Process a single CBZ file."""
+def process_cbz_file(filepath, work_dir, library_path, match_dict):
+    """Process a single CBZ file with isolated temp directory."""
     try:
+        # Create a unique subfolder for this file
+        file_id = os.path.splitext(os.path.basename(filepath))[0]
+        file_temp_dir = os.path.join(work_dir, "temp_processing", sanitize_filename(file_id))
+        
+        # Clean any existing directory with the same name
+        if os.path.exists(file_temp_dir):
+            shutil.rmtree(file_temp_dir)
+        os.makedirs(file_temp_dir, exist_ok=True)
+        
         original_size = os.path.getsize(filepath)
         print(f"{Fore.WHITE}      • Original size: {Fore.YELLOW}{original_size / (1024*1024):.2f} MB")
 
         print(f"{Fore.WHITE}      • Converting to WebP...")
-        new_filepath = convert_to_webp(filepath, temp_dir)
+        new_filepath = convert_to_webp(filepath, file_temp_dir)
         
         if not new_filepath or not os.path.exists(new_filepath):
             print(f"{Fore.YELLOW}      ⚠ WebP conversion failed, using original file")
-            file_to_move = filepath
+            # Copy original to temp dir to ensure consistent behavior
+            file_to_move = os.path.join(file_temp_dir, os.path.basename(filepath))
+            shutil.copy2(filepath, file_to_move)
+            logger.info(f"Copied original file to temp directory due to WebP conversion failure")
         else:
             new_size = os.path.getsize(new_filepath)
             print(f"{Fore.WHITE}      • WebP size: {Fore.YELLOW}{new_size / (1024*1024):.2f} MB")
@@ -757,8 +791,10 @@ def process_cbz_file(filepath, temp_dir, library_path, match_dict):
                 file_to_move = new_filepath
             else:
                 print(f"{Fore.YELLOW}      ⚠ WebP increased file size, using original")
-                file_to_move = os.path.join(temp_dir, os.path.basename(filepath))
+                # Copy original to temp dir for consistent behavior
+                file_to_move = os.path.join(file_temp_dir, os.path.basename(filepath))
                 shutil.copy2(filepath, file_to_move)
+                logger.info(f"Copied original file to temp directory due to WebP size increase")
 
         series = match_dict.get('Title') or match_dict.get('Series')
         volume = match_dict.get('Volume')
@@ -775,15 +811,27 @@ def process_cbz_file(filepath, temp_dir, library_path, match_dict):
         move_to_library(file_to_move, library_path, series, volume, chapter)
         print(f"{Fore.GREEN}      ✓ File moved successfully")
 
-        for item in os.listdir(temp_dir):
-            item_path = os.path.join(temp_dir, item)
-            if os.path.isfile(item_path):
-                os.remove(item_path)
+        # Clean up this file's temp directory completely
+        if os.path.exists(file_temp_dir):
+            shutil.rmtree(file_temp_dir)
+            logger.debug(f"Cleaned up temporary directory: {file_temp_dir}")
 
         return True
     except Exception as e:
         print(f"{Fore.RED}      ❌ Error: {str(e)}")
+        logger.error(f"Error processing file {filepath}: {str(e)}", exc_info=True)
+        # Make sure to clean up even on error
+        try:
+            if os.path.exists(file_temp_dir):
+                shutil.rmtree(file_temp_dir)
+        except Exception as cleanup_error:
+            logger.error(f"Cleanup error: {str(cleanup_error)}")
         return False
+
+def sanitize_filename(filename):
+    """Convert filename to a safe version for use as a directory name."""
+    # Replace problematic characters with underscores
+    return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
 def series_exists(library_path, series_name):
     series_path = os.path.join(library_path, series_name)
@@ -888,6 +936,89 @@ def test_patterns(test_files):
     print(f"{Fore.GREEN}✅ TESTING COMPLETE")
     print(f"{Fore.GREEN}{'='*60}")
 
+def clean_work_directory(work_directory, force=False):
+    """Clean up the work directory by removing the entire random directory."""
+    try:
+        if os.path.exists(work_directory):
+            # Safety check: Make sure it's a random directory we created
+            if os.path.basename(work_directory).startswith("mproc_"):
+                # Clean the entire directory
+                shutil.rmtree(work_directory)
+                print(f"{Fore.GREEN}✓ Cleaned up work directory: {work_directory}")
+                return True
+            else:
+                # This is not our random directory
+                print(f"{Fore.RED}✘ Safety check failed: {work_directory} doesn't appear to be a temporary processing directory")
+                print(f"{Fore.RED}  Directory name should start with 'mproc_'")
+                return False
+        else:
+            print(f"{Fore.YELLOW}⚠ Work directory does not exist: {work_directory}")
+            return True
+    except Exception as e:
+        print(f"{Fore.RED}✘ Error cleaning work directory: {str(e)}")
+        return False
+
+def generate_random_dirname(length=8):
+    """Generate a random alphanumeric directory name."""
+    chars = string.ascii_letters + string.digits
+    return "mproc_" + ''.join(random.choice(chars) for _ in range(length))
+
+def get_work_directory():
+    """Get base work directory and create a random subdirectory within it."""
+    print(f"\n{Fore.CYAN}{'='*60}")
+    print(f"{Fore.CYAN}🔧 TEMPORARY WORK DIRECTORY")
+    print(f"{Fore.CYAN}{'='*60}")
+    
+    print(f"\n{Fore.WHITE}This is where temporary processing files will be stored.")
+    print(f"{Fore.WHITE}The script will create a random subdirectory in your chosen location.")
+    print(f"{Fore.WHITE}This directory should have plenty of free space (at least 10GB recommended).")
+    
+    # Try to use system temp by default
+    default_dir = tempfile.gettempdir()
+    
+    print(f"\n{Fore.YELLOW}Default: {default_dir}")
+    print(f"{Fore.YELLOW}Examples: ")
+    print(f"{Fore.YELLOW}  • D:\\TempWork")
+    print(f"{Fore.YELLOW}  • C:\\Temp")
+    
+    while True:
+        print()
+        use_default = input(f"{Fore.GREEN}➤ Use default location? (y/n): {Fore.WHITE}").strip().lower()
+        
+        if use_default == 'y':
+            base_dir = default_dir
+        else:
+            base_dir = input(f"{Fore.GREEN}➤ Enter base work directory path: {Fore.WHITE}")
+        
+        if not base_dir.strip():
+            print(f"{Fore.RED}✘ Path cannot be empty. Please enter a valid directory.")
+            continue
+            
+        if not os.path.exists(base_dir):
+            print(f"{Fore.YELLOW}Directory '{base_dir}' doesn't exist.")
+            create_option = input(f"{Fore.GREEN}➤ Create this directory? (y/n): {Fore.WHITE}")
+            
+            if create_option.lower() != 'y':
+                continue
+                
+            try:
+                os.makedirs(base_dir)
+                print(f"{Fore.GREEN}✓ Directory created successfully!")
+            except Exception as e:
+                print(f"{Fore.RED}✘ Error creating directory: {str(e)}")
+                continue
+                
+        # Create a random subdirectory for this processing run
+        random_dirname = generate_random_dirname()
+        work_dir = os.path.join(base_dir, random_dirname)
+        
+        try:
+            os.makedirs(work_dir)
+            print(f"{Fore.GREEN}✓ Created temporary work directory: {work_dir}")
+            return work_dir
+        except Exception as e:
+            print(f"{Fore.RED}✘ Error creating work directory: {str(e)}")
+
 def get_library_path():
     """Get and validate the comic library path with enhanced UI."""
     print(f"\n{Fore.CYAN}{'='*60}")
@@ -975,7 +1106,7 @@ def get_download_directory():
             
         print(f"{Fore.RED}✘ Directory '{download_directory}' doesn't exist.")
 
-def confirm_processing(download_directory, library_path, dry_run=False, process_mode="auto"):
+def confirm_processing(download_directory, library_path, work_directory, dry_run=False, process_mode="auto"):
     """Show a summary of the operation and ask for confirmation before proceeding."""
     print(f"\n{Fore.CYAN}{'='*60}")
     print(f"{Fore.CYAN}💼 OPERATION SUMMARY")
@@ -1046,6 +1177,8 @@ def parse_arguments():
     parser.add_argument("--mode", "-m", type=str, choices=["standard", "bulk", "nested", "auto"], default="auto",
                         help="Processing mode: standard (individual files), bulk (archives containing multiple CBZs), "
                              "nested (folders of archives), auto (detect based on content)")
+    parser.add_argument("--work-dir", "-w", type=str, metavar="DIR",
+                        help="Work directory for temporary processing (with plenty of free space)")
     return parser.parse_args()
 
 if __name__ == '__main__':
@@ -1074,10 +1207,14 @@ if __name__ == '__main__':
 
     library_path = args.dest if args.dest else get_library_path()
     download_directory = args.source if args.source else get_download_directory()
+    work_directory = args.work_dir if args.work_dir else get_work_directory()
+
+    # Clean work directory at startup
+    clean_work_directory(work_directory)
 
     if not args.auto:
-        if not confirm_processing(download_directory, library_path, args.dry_run, args.mode):
+        if not confirm_processing(download_directory, library_path, work_directory,args.dry_run, args.mode):
             print(f"{Fore.YELLOW}Exiting without processing.")
             exit(0)
 
-    process_directory(download_directory, library_path, dry_run=args.dry_run, auto_mode=args.auto, process_mode=args.mode)
+    process_directory(download_directory, library_path, work_directory, dry_run=args.dry_run, auto_mode=args.auto, process_mode=args.mode)
