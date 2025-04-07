@@ -16,7 +16,7 @@ Manga_Download_Processor.py - Takes a folder you have with raw download files an
 - Todo:
   - Instead of just moving the file to the final library based on the series name, enumerate the folders in the final library and pick the one that seems like it is the closest match. That way small differences in naming don't interfear with movin the final file.
   - Test more regex patterns to cover different naming conventions. I have a good number of the most common use cases already figured out.
-  - Change the way the (F) system works. Fixed files could have numbers in them like `(F3)` in cases where there might of been a lot of re-releases. Need to account for (F#) 
+  - ~~Change the way the (F) system works. Fixed files could have numbers in them like `(F3)` in cases where there might of been a lot of re-releases. Need to account for (F#)~~
 
 
 
