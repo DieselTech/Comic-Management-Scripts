@@ -96,7 +96,6 @@ python c:/path/to/Manga_Download_Processor.py --auto --source "D:/Downloads/Mang
 0 3 * * * /usr/bin/python3 /path/to/Manga_Download_Processor.py --auto --source /path/to/downloads --dest /path/to/library >> /path/to/log_file.log 2>&1
 """
 
-
 import os
 import logging
 from logging.handlers import TimedRotatingFileHandler
@@ -118,6 +117,7 @@ import random
 import sys
 
 init(autoreset=True)
+can_process_rar = True
 
 patterns = [
     ('FullTitle_Year', re.compile(r'^(?P<Series>.+?)\s\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))*')),
@@ -682,6 +682,11 @@ def process_bulk_archives(root, files, work_directory, library_path, auto_mode, 
         logger.info("No RAR files found to process in bulk mode")
         return False, []  # No RAR files to process, not successful
     
+    if not dry_run and not can_process_rar:
+        logger.warning("Skipping RAR files - unrar not installed")
+        print(f"{Fore.YELLOW}⚠ Skipping {len(rar_files)} RAR files - unrar not installed")
+        return False, []
+    
     if dry_run:
         print(f"\n📁 Found {len(rar_files)} RAR files in {root} (bulk mode)")
         for rar_file in rar_files:
@@ -1231,15 +1236,19 @@ def parse_arguments():
 def check_dependencies():
     """Check for required dependencies and libraries"""
     missing_deps = []
+    global can_process_rar
+    can_process_rar = True
     
-    # Check unrar
+    # Check unrar - warn but don't fail if missing
     unrar_path = shutil.which("unrar")
     if unrar_path is None:
-        error_msg = "ERROR: 'unrar' is not installed or not found in the system path."
-        missing_deps.append(error_msg)
-        print(f"{Fore.RED}✘ {error_msg}", file=sys.stderr)
+        warning_msg = "WARNING: 'unrar' is not installed or not found in the system path."
+        print(f"{Fore.YELLOW}⚠ {warning_msg}", file=sys.stderr)
+        print(f"{Fore.YELLOW}⚠ RAR files will be skipped during processing.", file=sys.stderr)
+        logger.warning(warning_msg)
+        can_process_rar = False
         
-    # Check Python libraries
+    # Check Python libraries - these are essential
     required_libs = [
         ("zipfile", "Standard library"),
         ("PIL.Image", "Pillow"),
@@ -1255,7 +1264,7 @@ def check_dependencies():
             missing_deps.append(error_msg)
             print(f"{Fore.RED}✘ {error_msg}", file=sys.stderr)
     
-    # If any deps are missing, write to log file and exit
+    # If any essential deps are missing, write to log file and exit
     if missing_deps:
         try:
             # Write plain text version to a dedicated file for service managers
@@ -1273,7 +1282,10 @@ def check_dependencies():
         print(f"{Fore.YELLOW}Please install the required libraries and try again.", file=sys.stderr)
         exit(1)
     else:
-        print(f"{Fore.GREEN}✓ All dependencies are installed.")
+        if can_process_rar:
+            print(f"{Fore.GREEN}✓ All dependencies are installed.")
+        else:
+            print(f"{Fore.GREEN}✓ Core dependencies are installed. {Fore.YELLOW}(RAR support unavailable)")
 
 
 if __name__ == '__main__':
@@ -1284,7 +1296,7 @@ if __name__ == '__main__':
     check_dependencies()
 
 
-    if args.test:
+    if args.test_pattern:
         if args.filenames:
             # Use filenames provided on command line
             test_filenames = args.filenames
