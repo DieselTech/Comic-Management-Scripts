@@ -6,6 +6,9 @@ A tool for organizing and processing manga/comic files by automatically detectin
 chapter numbers, and volume information from filenames. This script can extract compressed files, 
 convert images to WebP format for space savings, and organize files into a structured library.
 
+Version: 0.9.0
+Updated: 4/14/2025
+
 Requirements:
 ------------
 - Python 3.6+
@@ -118,6 +121,8 @@ import sys
 
 init(autoreset=True)
 can_process_rar = True
+_stored_pattern_choice = None
+_stored_manual_pattern = None
 
 patterns = [
     ('FullTitle_Year', re.compile(r'^(?P<Series>.+?)\s\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))*')),
@@ -185,7 +190,7 @@ def setup_logging():
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(console_formatter)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.WARNING)
 
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
@@ -321,7 +326,39 @@ def validate_match(match_dict):
     return True
 
 def match_best_pattern(filename, auto_mode=False):
+    global _stored_pattern_choice, _stored_manual_pattern
     all_matches = []
+
+    # Check if we have a stored pattern choice that applies to this file
+    if _stored_pattern_choice:
+        stored = _stored_pattern_choice
+        # Only apply if filename starts exactly with the series name
+        if filename.startswith(stored['series_prefix']):
+            logger.debug(f"Using stored pattern '{stored['pattern_name']}' for '{filename}'")
+            
+            # Find and apply the pattern from our patterns list
+            for pattern_name, pattern in patterns:
+                if pattern_name == stored['pattern_name']:
+                    match = pattern.match(filename)
+                    if match and match.groupdict():
+                        return stored['pattern_name'], match.groupdict()
+    
+    # Check if we have a stored manual pattern that applies
+    if _stored_manual_pattern:
+        stored = _stored_manual_pattern
+        # Only apply if filename starts exactly with the series name
+        if filename.startswith(stored['series_prefix']):
+            # For manual patterns, we need to update the chapter number
+            match_dict = stored['match_dict'].copy()
+            
+            # Try to extract chapter number from filename
+            # Find numbers after the series name
+            chapter_match = re.search(r'\b(\d+(?:\.\d+)?)\b', 
+                                     filename[len(stored['series_prefix']):])
+            if chapter_match:
+                match_dict['Chapter'] = chapter_match.group(1)
+                logger.debug(f"Using stored manual pattern for '{filename}' with chapter {match_dict['Chapter']}")
+                return "Manual Entry", match_dict
     
     # Try all patterns and collect all matches with scores
     for pattern_name, pattern in patterns:
@@ -356,30 +393,98 @@ def match_best_pattern(filename, auto_mode=False):
             
     # Interactive mode matches with close scores, ask user
     if len(all_matches) > 1 and all_matches[0][2] > 0 and all_matches[0][2] - all_matches[1][2] < 4:
-        print(f"\nMultiple good matches found for: {filename}")
-        for i, (pattern_name, match_dict, score) in enumerate(all_matches[:3]):  # Show top 3
-            print(f"{i+1}. Pattern: {pattern_name} (Score: {score})")
-            print(f"   Match: {match_dict}")
+        print(f"\n{Fore.CYAN}{'='*30}")
+        print(f"{Fore.CYAN}🔍 MULTIPLE MATCHES FOUND")
+        print(f"{Fore.CYAN}{'='*30}")
         
-        choice = input(f"\nSelect pattern (1-{min(3, len(all_matches))}) or 'M' for manual entry: ").strip()
+        print(f"\n{Fore.WHITE}File: {Fore.YELLOW}{filename}")
+        
+        for i, (pattern_name, match_dict, score) in enumerate(all_matches[:3]):  # Show top 3
+            series = match_dict.get('Title') or match_dict.get('Series') or "Unknown"
+            chapter = match_dict.get('Chapter') or "N/A"
+            
+            print(f"\n{Fore.WHITE}{i+1}. {Fore.GREEN}Pattern: {Fore.BLUE}{pattern_name} {Fore.WHITE}(Score: {Fore.YELLOW}{score}{Fore.WHITE})")
+            print(f"   {Fore.WHITE}Series: {Fore.CYAN}{series}")
+            print(f"   {Fore.WHITE}Chapter: {Fore.CYAN}{chapter}")
+        
+        print(f"\n{Fore.WHITE}Options:")
+        print(f"{Fore.WHITE}• Enter {Fore.YELLOW}1-{min(3, len(all_matches))}{Fore.WHITE} to select a specific match")
+        print(f"{Fore.WHITE}• Enter {Fore.YELLOW}A{Fore.WHITE} to use the top match for all similar files")
+        print(f"{Fore.WHITE}• Enter {Fore.YELLOW}M{Fore.WHITE} to manually enter series details")
+        
+        choice = input(f"\n{Fore.GREEN}➤ Your choice: {Fore.WHITE}").strip()
         
         if choice.lower() == 'm':
-            manual_series = input("Enter series name: ").strip()
-            manual_chapter = input("Enter chapter number (or press Enter to skip): ").strip()
-            manual_volume = input("Enter volume number (or press Enter to skip): ").strip()
+            manual_series = input(f"{Fore.GREEN}➤ Enter series name: {Fore.WHITE}").strip()
+            manual_chapter = input(f"{Fore.GREEN}➤ Enter chapter number (or press Enter to skip): {Fore.WHITE}").strip()
+            manual_volume = input(f"{Fore.GREEN}➤ Enter volume number (or press Enter to skip): {Fore.WHITE}").strip()
             
             match_dict = {'Series': manual_series}
             if manual_chapter:
                 match_dict['Chapter'] = manual_chapter
             if manual_volume:
                 match_dict['Volume'] = manual_volume
+            
+            apply_to_all = input(f"{Fore.GREEN}➤ Apply this manual entry to all similar files? (y/n): {Fore.WHITE}").strip().lower() == 'y'
+            if apply_to_all:
+                # Store this manual pattern with exact series prefix matching
+                _stored_manual_pattern = {
+                    'type': 'manual',
+                    'series': manual_series,
+                    'series_prefix': manual_series + ' ',  # Exact series name plus space
+                    'match_dict': match_dict.copy()
+                }
+                print(f"{Fore.GREEN}✓ Manual pattern will be applied to all '{manual_series}' files")
                 
             return ("Manual Entry", match_dict)
+        
+        elif choice.lower() == 'a':
+            # Apply the best match to all similar files
+            selected_pattern = all_matches[0][0]
+            selected_match = all_matches[0][1]
+            series = selected_match.get('Title') or selected_match.get('Series')
+            
+            if series:
+                # Store this pattern choice globally with exact series prefix matching
+                _stored_pattern_choice = {
+                    'type': 'pattern',
+                    'pattern_name': selected_pattern,
+                    'series': series,
+                    'series_prefix': series + ' '  # Exact series name plus space
+                }
+                print(f"{Fore.GREEN}✓ Using top match '{selected_pattern}' for all '{series}' files")
+                return selected_pattern, selected_match
+            else:
+                print(f"{Fore.YELLOW}⚠ Could not determine series name from match")
+                return all_matches[0][0], all_matches[0][1]
         
         try:
             idx = int(choice) - 1
             if 0 <= idx < len(all_matches):
+                selected_pattern = all_matches[idx][0]
+                selected_match = all_matches[idx][1]
+                series = selected_match.get('Title') or selected_match.get('Series') or "Unknown"
+                
+                # Ask if this should apply to all similar files
+                print(f"{Fore.WHITE}Selected: {Fore.CYAN}{selected_pattern} {Fore.WHITE}for '{Fore.YELLOW}{series}{Fore.WHITE}'")
+                apply_to_all = input(f"{Fore.GREEN}➤ Apply this pattern to all similar files? (y/n): {Fore.WHITE}").strip().lower() == 'y'
+                
+                if apply_to_all and series != "Unknown":
+                    _stored_pattern_choice = {
+                        'type': 'pattern',
+                        'pattern_name': selected_pattern,
+                        'series': series,
+                        'series_prefix': series + ' '  # Exact series name plus space
+                    }
+                    print(f"{Fore.GREEN}✓ Pattern '{selected_pattern}' will be applied to all '{series}' files")
+                
                 return all_matches[idx][0], all_matches[idx][1]
+            else:
+                print(f"{Fore.RED}✘ Invalid selection. Using best match.")
+                return all_matches[0][0], all_matches[0][1]
+        except ValueError:
+            print(f"{Fore.RED}✘ Invalid input. Using best match.")
+            return all_matches[0][0], all_matches[0][1]
         except ValueError:
             pass
     
@@ -446,9 +551,11 @@ def extract_rars(folder_path, work_directory):
                 shutil.rmtree(folder_name)
             os.makedirs(folder_name)
             
+            print(f"{Fore.WHITE}      • Extracting {Fore.YELLOW}{file}")
             subprocess.call(['unrar', 'x', rar_path, folder_name])
             num_extracted = len([f for f in os.listdir(folder_name) 
                                if os.path.isfile(os.path.join(folder_name, f))])
+            print(f"{Fore.WHITE}      • Extracted {Fore.GREEN}{num_extracted} files")
             logger.info(f"Extracted {num_extracted} files to: {folder_name}")
             extracted_folders.append(folder_name)
             
@@ -720,11 +827,11 @@ def process_bulk_archives(root, files, work_directory, library_path, auto_mode, 
                         continue
                         
                     match_type, match_dict = match_result
-                    logger.info(f"\nProcessing extracted: {filename}")
-                    logger.info(f"Match Type: {match_type}")
-                    logger.info(f"Match: {match_dict}")
-
+                    print(f"\n{Fore.WHITE}    📄 Processing extracted: {Fore.YELLOW}{filename}")
+                    print(f"{Fore.WHITE}    📋 Match type: {Fore.CYAN}{match_type}")
+                    
                     if not match_dict or (not match_dict.get('Title') and not match_dict.get('Series')):
+                        print(f"{Fore.RED}    ❌ Could not determine series for {filename}")
                         logger.warning(f"Could not determine series for {filename}")
                         continue
 
@@ -1155,7 +1262,7 @@ def get_download_directory():
             
         print(f"{Fore.RED}✘ Directory '{download_directory}' doesn't exist.")
 
-def confirm_processing(download_directory, library_path, work_directory, dry_run=False, process_mode="auto"):
+def confirm_processing(download_directory, library_path, work_directory, dry_run=False, process_mode="auto", max_threads=0):
     """Show a summary of the operation and ask for confirmation before proceeding."""
     print(f"\n{Fore.CYAN}{'='*60}")
     print(f"{Fore.CYAN}💼 OPERATION SUMMARY")
@@ -1188,13 +1295,14 @@ def confirm_processing(download_directory, library_path, work_directory, dry_run
     print(f"{Fore.WHITE}1. Search for comic files in {Fore.YELLOW}{download_directory}")
     print(f"{Fore.WHITE}2. Process {Fore.YELLOW}{root_files + subdir_files} files {Fore.WHITE}({root_files} in root, {subdir_files} in subfolders)")
     print(f"{Fore.WHITE}3. Organize them into {Fore.YELLOW}{library_path}")
-    print(f"{Fore.WHITE}4. Use processing mode: {Fore.YELLOW}{mode_desc}")
+    print(f"{Fore.WHITE}4. Use temporary work directory: {Fore.YELLOW}{work_directory}")
+    print(f"{Fore.WHITE}5. Use processing mode: {Fore.YELLOW}{mode_desc}")
     
     if dry_run:
         print(f"\n{Fore.YELLOW}⚠ DRY RUN MODE: No files will be modified")
     
     print(f"\n{Fore.WHITE}During processing:")
-    print(f"{Fore.WHITE}• Files will be converted to WebP format when beneficial")
+    print(f"{Fore.WHITE}• Files will be converted to WebP format when beneficial using {Fore.YELLOW} {max_threads} threads")
     print(f"{Fore.WHITE}• Series folders will be created automatically")
     print(f"{Fore.WHITE}• Processed folders will move to !Finished directory")
     
@@ -1229,7 +1337,7 @@ def parse_arguments():
     parser.add_argument("--work-dir", "-w", type=str, metavar="DIR",
                         help="Work directory for temporary processing (with plenty of free space)")
     parser.add_argument("--threads", "-t", type=int, default=0, 
-                        help="Maximum number of threads for image conversion (0=auto, default: 50% of CPU cores)")
+                        help="Maximum number of threads for image conversion (0=auto, default: 50%% of CPU cores)")
     return parser.parse_args()
 
 
@@ -1321,7 +1429,7 @@ if __name__ == '__main__':
     work_directory = args.work_dir if args.work_dir else get_work_directory()
 
     if not args.auto:
-        if not confirm_processing(download_directory, library_path, work_directory,args.dry_run, args.mode):
+        if not confirm_processing(download_directory, library_path, work_directory, args.dry_run, args.mode, args.threads):
             print(f"{Fore.YELLOW}Exiting without processing.")
             exit(0)
 
