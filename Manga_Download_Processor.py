@@ -6,8 +6,8 @@ A tool for organizing and processing manga/comic files by automatically detectin
 chapter numbers, and volume information from filenames. This script can extract compressed files, 
 convert images to WebP format for space savings, and organize files into a structured library.
 
-Version: 0.9.0
-Updated: 4/14/2025
+Version: 0.9.5
+Updated: 4/27/2025
 
 Requirements:
 ------------
@@ -126,20 +126,36 @@ _stored_manual_pattern = None
 
 patterns = [
     ('FullTitle_Year', re.compile(r'^(?P<Series>.+?)\s\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))*')),
+    ('Series_c_Chapter_Year', re.compile(r'^(?P<Series>.+?)\sc(?P<Chapter>\d+(?:\.\d+)?)\s+\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))*')),
     ('Complete_Series', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d+(?:\.\d+)?)\s+\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))*')),
     ('Complex_Series', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3})\s+\((?P<Year>\d{4})\)')),
     ('Complex_SeriesDecimal', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3}(?:\.\d+)?)\s+\((?P<Year>\d{4})\)')),
     ('Complex_Series2', re.compile(r'(?P<Series>.+?)\s(?P<Chapter>\d{3})\s+\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))+')),
+    ('Webtoon_Season_Bracket', re.compile(r'^(?P<Series>.+?)\s\[Season\s(?P<Volume>\d+)\]\s+Ep\.\s+(?P<Chapter>\d+(?:\.\d+|-\d+)?)')),
+    ('Webtoon_Season', re.compile(r'^(?P<Series>.+?)\s+Season\s+(?P<Volume>\d+)\s+Ep\.\s+(?P<Chapter>\d+(?:\.\d+|-\d+)?)')),
+    ('Webtoon_S_c', re.compile(r'^(?P<Series>.+?)\s+S(?P<Volume>\d+)\s+c(?P<Chapter>\d+(?:\.\d+|-\d+)?)')),
+    ('Webtoon_Season_Epilogue', re.compile(r'^(?P<Series>.+?)\s+Season\s+(?P<Volume>\d+)\s+\((?P<Extra>[^)]+)\)')),
+    ('Webtoon_Season_Parentheses', re.compile(r'^(?P<Series>.+?)\s+\(S(?P<Volume>\d+)\)\s+Episode\s+(?P<Chapter>\d+(?:\.\d+|-\d+)?)')),
+    ('Webtoon_Episode', re.compile(r'^(?P<Series>.+?)\s+Episode\s+(?P<Chapter>\d+(?:\.\d+|-\d+)?)')),
+    ('Webtoon_Bracket_Vol_Ch', re.compile(r'^(?P<Series>.+?)\s\[(?:vol|volume)\s+(?P<Volume>\d+)\]\s+(?:ch|chapter)\.?\s+(?P<Chapter>\d+(?:\.\d+|-\d+)?)', re.IGNORECASE)),
+    ('Webtoon_Hash_Ep', re.compile(r'^(?P<Series>.+?)\s+#(?P<Chapter>\d+)(?:\s+-\s+Ep\.\s+\d+)?(?:\.cbz|\.cbr)?$')),
+    ('Series_Vol_Bare_Chapter_Space', re.compile(r'^(?P<Series>.+?)\s+Vol\.\s+(?P<Volume>\d+)\s+(?P<Chapter>\d+(?:\.\d+)?)')),
+    ('Series_Vol_Bare_Chapter', re.compile(r'^(?P<Series>.+?)(?:\s+Vol\.(?P<Volume>\d+))(?:\s+)(?P<Chapter>\d+(?:\.\d+|-\d+)?)')),
+    ('Series_Vol_Ch', re.compile(r'^(?P<Series>.+?)\s+Vol\.?\s*(?P<Volume>\d+)\s+Ch\.?\s*(?P<Chapter>\d+(?:\.\d+)?)')),
     ('Ch', re.compile(r'(\b|_)(c|ch)(\.?\s?)(?P<Chapter>(\d+(\.\d)?)(-c?\d+(\.\d)?)?)')),
-    ('Ch_bare', re.compile(r'^(?P<Series>.+?)(?<!Vol)(?<!Vol.)(?<!Volume)(?<!\sCh)(?<!\sChapter)\s(\d\s)?(?P<Chapter>\d+(?:\.\d+|-\d+)?)(?:\s\(\d{4}\))?(\b|_|-)')),
+    ('Ch_bare', re.compile(r'^(?!.*\b(?:v|vo|vol|Volume)\b)(?P<Series>.+?)(\s|_)(?P<Chapter>\d+(?:\.\d+|-\d+)?)(?P<Part>b)?(\s|_|\[|\()')),
     ('Ch_bare2', re.compile(r'^(?!Vol)(?P<Series>.*)\s?(?<!vol\. )\sChapter\s(?P<Chapter>\d+(?:\.?[\d-]+)?)')),
     ('Series_Dash_Ch', re.compile(r'^(?P<Series>.+?)\s-\s(?:Ch|Chapter)\.?\s(?P<Chapter>\d+(?:\.\d+)?)\.?(?:cbz|cbr)?$')),
+    ('Series_Ch_Dash_Extra', re.compile(r'^(?P<Series>.+?)\s+Ch\.\s+(?P<Chapter>\d+(?:\.\d+)?)\s+-\s+(?P<Extra>.+)')),
+    ('Series_Dot_Ch', re.compile(r'^(?P<Series>.+?)(?=\.\s*(?:Ch\.?|Chapter))\.\s*(?:Ch\.?|Chapter)\s*(?P<Chapter>\d+)(?:\s*-\s*(?P<Extra>.*?))?$')),
     ('Series_Ch_Number', re.compile(r'^(?P<Series>.+?)(?<!\s-)\s(?:Ch\.?|Chapter)\s?(?P<Chapter>\d+(?:\.\d+)?)')),
     ('Series_Chapter', re.compile(r'^(?P<Series>.+?)(?<!\s[Vv]ol)(?<!\sVolume)\sChapter\s(?P<Chapter>\d+(?:\.\d+)?)')),
     ('Series_Vol_Ch', re.compile(r'^(?P<Series>.+?)\sv(?P<Volume>\d+)(?:\s-\s)(?:Ch\.?|Chapter)\s?(?P<Chapter>\d+(?:\.\d+)?)')),
+    ('Series_Dash_c_Year', re.compile(r'^(?P<Series>.+?)\s-\sc(?P<Chapter>\d+(?:\.\d+)?)\s+\((?P<Year>\d{4})\)(?:\s+\((?P<Extra>[^)]+)\))*')),
     ('Volume', re.compile(r'(?P<Title>.+?)\s(?:v|V)(?P<Volume>\d+)(?:\s-\s(?P<Extra>.*?))?\s*(?:\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))?')),
+    ('Series_Bare_Chapter', re.compile(r'^(?P<Series>.+?)\s+(?P<Chapter>\d+(?:\.\d+)?)(?=$|\s|-)')),
     ('ChapterExtras', re.compile(r'(?P<Title>.+?)(?=\s+(?:c|ch|chapter)\b|\s+c\d)(?:.*?(?:c|ch|chapter))?\s*(?P<Chapter>\d+(?:\.\d+)?)?(?:\s-\s(?P<Extra>.*?))?(?:\s*\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))?')),
-    ('Chapter', re.compile(r'(?P<Title>.+?)\s(?:(?:c|ch|chapter)?\s*(?P<Chapter>\d+(?:\.\d+)?))?(?:\s-\s(?P<Extra>.*?))?\s*(?:\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))?')),
+    ('Chapter', re.compile(r'(?P<Title>.+)\s(?:(?:c|ch|chapter)?\s*(?P<Chapter>\d+(?:\.\d+)?))?(?:\s-\s(?P<Extra>.*?))?\s*(?:\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))?')),
     ('Simple_Ch', re.compile(r'Chapter(?P<Chapter>\d+(-\d+)?)')),
     ('Vol_Chp', re.compile(r'(?P<Series>.*)(\s|_)(vol\d+)?(\s|_)Chp\.? ?(?P<Chapter>\d+)')),
     ('V_Ch', re.compile(r'v\d+\.(\s|_)(?P<Chapter>\d+(?:.\d+|-\d+)?)')),
@@ -149,8 +165,8 @@ patterns = [
     ('Vol_Chapter2', re.compile(r'(?P<Volume>((vol|volume|v))?(\s|_)?\.?\d+)(\s|_)(?P<Chapter>\d+)')),
     ('Vol_Chapter3', re.compile(r'(?P<Volume>((vol|volume|v))?(\s|_)?\.?\d+)(\s|_)(?P<Chapter>\d+(?:.\d+|-\d+)?)')),
     ('Vol_Chapter4', re.compile(r'(?P<Volume>((vol|volume|v))?(\s|_)?\.?\d+)(\s|_)(?P<Chapter>\d+(?:.\d+|-\d+)?)(\s|_)(?P<Extra>.*?)')),
-    ('Vol_Chapter5', re.compile(r'(\b|_)(c|ch)(\.?\s?)(?P<Chapter>(\d+(\.\d)?)(-c?\d+(\.\d)?)?)')),
-    ('Monolith', re.compile(r'(?P<Title>.+?)\s(?:(?:c|ch|chapter)?\s*(?P<Chapter>\d+(?:\.\d+)?))(?:\s-\s(?P<Extra>.*?))?(?:\s*\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))')),
+    ('Series_Dash_Ch_Episode', re.compile(r'^(?P<Series>.+?)\s+-\s+c(?P<Chapter>\d+(?:\.\d+)?)\s+-\s+Episode\s+\d+(?:\s+\([^)]+\))*')),
+#    ('Monolith', re.compile(r'(?P<Title>.+?)\s(?:(?:c|ch|chapter)?\s*(?P<Chapter>\d+(?:\.\d+)?))(?:\s-\s(?P<Extra>.*?))?(?:\s*\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))')),
 ]
 
 GROUP_WEIGHTS = {
@@ -166,7 +182,7 @@ GROUP_WEIGHTS = {
 
 # Quality indicators for pattern validation
 SERIES_MIN_LENGTH = 2  # Minimum characters for a valid series name
-MAX_REALISTIC_CHAPTER = 999  # Maximum realistic chapter number
+MAX_REALISTIC_CHAPTER = 500  # Maximum realistic chapter number
 
 def setup_logging():
     # Create logger with daily rotation and proper formatting
@@ -190,7 +206,7 @@ def setup_logging():
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(console_formatter)
-    console_handler.setLevel(logging.WARNING)
+    console_handler.setLevel(logging.DEBUG)
 
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
@@ -221,109 +237,378 @@ def score_match(match_dict, filename):
     """Score a match based on weighted groups and quality checks"""
     if not match_dict:
         return 0
-        
-    score = 0
 
-    # Reject matches with invalid captures
+    score = 0
+    pattern_name = match_dict.get('_pattern_name')
+    logger.debug(f"---\nScoring pattern '{pattern_name}' for filename '{filename}'")
+
+    # Reject invalid
     if not validate_match(match_dict):
+        logger.debug("  → validate_match failed, score=0")
         return 0
 
-    # Clean the filename for comparison purposes
+    # Clean filename
     clean_filename = os.path.splitext(filename)[0]
-    clean_filename = re.sub(r'\s+\(\d{4}\).*$', '', clean_filename)  # Remove year and anything after
+    clean_filename = re.sub(r'\s+\(\d{4}\).*$', '', clean_filename)
 
-    # Boost specific reliable patterns
-    pattern_name = getattr(match_dict, '_pattern_name', None)
+    # Track significant penalties for later use
+    has_significant_penalty = False
+
+    # Pattern‐specific bonuses
+    if pattern_name and pattern_name.startswith('Webtoon_'):
+        score += 5
+        logger.debug(f"  +5 webtoon bonus → {score}")
 
     if pattern_name == 'Series_Dash_Ch':
         score += 4
+        logger.debug(f"  +4 Series_Dash_Ch bonus → {score}")
     elif pattern_name in ('Complete_Series', 'Complex_Series'):
-        if match_dict.get('Series') and match_dict.get('Chapter'):
-            if 'Year' in match_dict and match_dict['Year']:
-                score += 3
+        if match_dict.get('Series') and match_dict.get('Chapter') and match_dict.get('Year'):
+            score += 3
+            logger.debug(f"  +3 Complete/Complex bonus → {score}")
 
-    # Add weighted scores for each group
+    # Group‐weight scoring
     for key, value in match_dict.items():
-        if value and isinstance(value, str) and value.strip():
-            score += GROUP_WEIGHTS.get(key, 1)
-            
-            # Quality checks for specific fields
-            if key in ('Series', 'Title'):
-                series_value = value.strip()
+        if not value or not isinstance(value, str) or not value.strip():
+            continue
 
-                if len(value.strip()) >= SERIES_MIN_LENGTH:
-                    score += min(len(value.strip()) / 10, 3)
-                else:
-                    score -= 5
-                
-                if value.strip().isdigit():
-                    score -= 8
-                
-                if value.strip().endswith(("Ch.", "Ch", "Chapter")):
-                    score -= 10
-                
-                if value.strip().endswith(("-", ":", ".")):
-                    score -= 8 
-                
-                # Check if series name is too short compared to filename
-                if len(series_value) < len(clean_filename) * 0.3:  # Series less than 30% of filename length
-                    score -= 8
-                
-                # Check for single word series from multi-word filename
-                filename_words = len(re.findall(r'\b\w+\b', clean_filename))
-                series_words = len(re.findall(r'\b\w+\b', series_value))
-                if series_words == 1 and filename_words >= 3:
-                    score -= 10
-                
-                # Check word overlap between filename and series
-                if filename_words >= 3:  # Only check for multi-word titles
-                    filename_word_set = set(w.lower() for w in re.findall(r'\b\w+\b', clean_filename))
-                    series_word_set = set(w.lower() for w in re.findall(r'\b\w+\b', series_value))
-                    common_words = filename_word_set.intersection(series_word_set)
-                    if len(common_words) < len(filename_word_set) * 0.3:  # Less than 30% word overlap
-                        score -= 8
+        w = GROUP_WEIGHTS.get(key, 1)
+        score += w
+        logger.debug(f"  +{w} weight for '{key}'='{value}' → {score}")
 
-            elif key == 'Chapter':
-                try:
-                    ch_num = float(value.strip())
-                    if 1 <= ch_num <= MAX_REALISTIC_CHAPTER:
-                        score += 2
-                    else:
-                        score -= 5
-                except ValueError:
-                    if '-' in value:
-                        score += 1
-                    else:
-                        score -= 2
-    
-    # Check for essential components
+        # Field-specific validation checks
+        if key in ('Series', 'Title'):
+            score_adjustment, penalty_flag = validate_series_field(value, clean_filename, score, pattern_name)
+            score += score_adjustment
+            has_significant_penalty = has_significant_penalty or penalty_flag
+        elif key == 'Chapter':
+            score_adjustment, penalty_flag = validate_chapter_field(value, score)
+            score += score_adjustment
+            has_significant_penalty = has_significant_penalty or penalty_flag
+        elif key == 'Volume':
+            score_adjustment, penalty_flag = validate_volume_field(value, score)
+            score += score_adjustment
+            has_significant_penalty = has_significant_penalty or penalty_flag
+        elif key == 'Year':
+            score_adjustment, penalty_flag = validate_year_field(value, score)
+            score += score_adjustment
+            has_significant_penalty = has_significant_penalty or penalty_flag
+
+    # Essential components
     has_series = bool(match_dict.get('Series') or match_dict.get('Title'))
-    has_numbering = bool(match_dict.get('Chapter') or match_dict.get('Volume'))
+    has_number = bool(match_dict.get('Chapter') or match_dict.get('Volume'))
     
-    if has_series and has_numbering:
+    # Check for field pollution (data in wrong fields)
+    score_adjustment, pollution_penalty = check_field_pollution(match_dict)
+    score += score_adjustment
+    has_significant_penalty = has_significant_penalty or pollution_penalty
+    logger.debug(f"  {score_adjustment:+d} field pollution check → {score}")
+    
+    # Only give essential components bonus if we have both AND no significant penalties
+    if has_series and has_number and not has_significant_penalty:
         score += 5
+        logger.debug(f"  +5 essential components bonus → {score}")
     elif not has_series:
-        score -= 10
-        
-    # Bonus for good filename coverage
-    matched_parts = ''.join(str(v) for v in match_dict.values() if v)
-    coverage_ratio = len(matched_parts) / len(filename)
-    if coverage_ratio > 0.6:
+        score -= 20
+        logger.debug(f"  -20 missing series penalty → {score}")
+
+    # Coverage bonus
+    parts = ''.join(v for v in match_dict.values() if isinstance(v, str))
+    cov = len(parts) / len(filename)
+    if cov > 0.6 and not has_significant_penalty:
         score += 3
-    
+        logger.debug(f"  +3 coverage bonus ({cov:.2f}) → {score}")
+
+    logger.debug(f"Final score for '{pattern_name}': {score}\n")
     return score
+
+def validate_series_field(value, clean_filename, score, pattern_name):
+    """Validates series/title field and returns score adjustment"""
+    score_adjustment = 0
+    has_significant_penalty = False
+    sv = value.strip()
+    
+    # length bonus/penalty
+    if len(sv) >= SERIES_MIN_LENGTH:
+        bonus = min(len(sv)/10, 3)
+        score_adjustment += bonus
+        logger.debug(f"    +{bonus:.1f} length bonus → {score + score_adjustment}")
+    else:
+        score_adjustment -= 5
+        logger.debug(f"    -5 too short penalty → {score + score_adjustment}")
+    
+    # pure‐digit
+    if sv.isdigit():
+        score_adjustment -= 8
+        logger.debug(f"    -8 digit series penalty → {score + score_adjustment}")
+    
+    # endswith Chapter variations
+    if re.search(r'(?i)\b(ch\.?|chapter)(\s+\d+)?$', sv):
+        score_adjustment -= 10
+        has_significant_penalty = True
+        logger.debug(f"    -10 endswith Chapter penalty → {score + score_adjustment}")
+    
+    # trailing punctuation
+    if sv.endswith(("-", ":", ".")) and not is_likely_abbreviation(sv):
+        score_adjustment -= 8
+        logger.debug(f"    -8 trailing punctuation penalty → {score + score_adjustment}")
+    
+    # volume indicator
+    if re.search(r'(?i)\bvol(?:ume)?\.?\s*\d+\b', sv):
+        score_adjustment -= 15
+        has_significant_penalty = True
+        logger.debug(f"    -15 volume‐in‐series penalty → {score + score_adjustment}")
+    
+    # season indicator
+    if not pattern_name or not pattern_name.startswith('Webtoon_'):
+        if re.search(r'\bSeason\s*\d+\b|\(S\d+\)', sv):
+            score_adjustment -= 15
+            has_significant_penalty = True
+            logger.debug(f"    -15 season‐in‐series penalty → {score + score_adjustment}")
+    
+    # too short relative
+    if len(sv) < len(clean_filename)*0.3:
+        score_adjustment -= 8
+        logger.debug(f"    -8 relative short series penalty → {score + score_adjustment}")
+    
+    # single‐word vs multi‐word
+    fnw = len(re.findall(r'\b\w+\b', clean_filename))
+    sgw = len(re.findall(r'\b\w+\b', sv))
+    if sgw==1 and fnw>=3:
+        score_adjustment -= 10
+        logger.debug(f"    -10 single‐word series penalty → {score + score_adjustment}")
+    
+    # word overlap
+    if fnw>=3:
+        fset = set(w.lower() for w in re.findall(r'\b\w+\b', clean_filename))
+        sset = set(w.lower() for w in re.findall(r'\b\w+\b', sv))
+        if len(fset & sset) < len(fset)*0.3:
+            score_adjustment -= 8
+            logger.debug(f"    -8 low overlap penalty → {score + score_adjustment}")
+    
+    # Chapter number in series name (not at end)
+    if re.search(r'(?i)\b(?:ch|chapter)\s*\d+\b(?!$)', sv):
+        score_adjustment -= 12
+        logger.debug(f"    -12 chapter-in-series penalty → {score + score_adjustment}")
+    
+    # Episode identifier in series name
+    if re.search(r'(?i)\bepisode\s*\d+\b', sv) and not pattern_name.startswith('Webtoon_'):
+        score_adjustment -= 10
+        logger.debug(f"    -10 episode-in-series penalty → {score + score_adjustment}")
+    
+    return score_adjustment, has_significant_penalty
+
+def validate_chapter_field(value, score):
+    """Validates chapter field and returns score adjustment"""
+    score_adjustment = 0
+    has_significant_penalty = False
+    
+    try:
+        ch = float(value)
+        if 0 <= ch <= MAX_REALISTIC_CHAPTER:  # Changed from 1 to 0 to allow chapter zero
+            score_adjustment += 2
+            logger.debug(f"    +2 realistic chapter bonus → {score + score_adjustment}")
+        else:
+            score_adjustment -= 5
+            logger.debug(f"    -5 unrealistic chapter penalty → {score + score_adjustment}")
+    except ValueError:
+        if '-' in value:
+            score_adjustment += 1
+            logger.debug(f"    +1 range chapter bonus → {score + score_adjustment}")
+        else:
+            score_adjustment -= 2
+            logger.debug(f"    -2 non‐numeric chapter penalty → {score + score_adjustment}")
+    
+    # NEW: Check for text that belongs in series
+    if re.search(r'[a-zA-Z]{4,}', value) and not re.search(r'(?i)part|side|extra', value):
+        score_adjustment -= 10
+        has_significant_penalty = True
+        logger.debug(f"    -10 text-in-chapter penalty → {score + score_adjustment}")
+    
+    return score_adjustment, has_significant_penalty
+
+def validate_volume_field(value, score):
+    """Validates volume field and returns score adjustment"""
+    score_adjustment = 0
+    has_significant_penalty = False
+    
+    MAX_REALISTIC_VOLUME = 100  # Most series don't go beyond this
+    
+    try:
+        vol = float(value)
+        if 1 <= vol <= MAX_REALISTIC_VOLUME:
+            score_adjustment += 1
+            logger.debug(f"    +1 realistic volume bonus → {score + score_adjustment}")
+        else:
+            score_adjustment -= 3
+            logger.debug(f"    -3 unrealistic volume penalty → {score + score_adjustment}")
+    except ValueError:
+        score_adjustment -= 3
+        logger.debug(f"    -3 non-numeric volume penalty → {score + score_adjustment}")
+    
+    # Check for text that belongs in series
+    if re.search(r'[a-zA-Z]{4,}', value):
+        score_adjustment -= 8
+        has_significant_penalty = True
+        logger.debug(f"    -8 text-in-volume penalty → {score + score_adjustment}")
+    
+    return score_adjustment, has_significant_penalty
+
+def validate_year_field(value, score):
+    """Validates year field and returns score adjustment"""
+    score_adjustment = 0
+    has_significant_penalty = False
+    
+    current_year = date.today().year
+    
+    try:
+        year = int(value)
+        if 1900 <= year <= current_year + 5:  # Allow some future dates
+            score_adjustment += 1
+            logger.debug(f"    +1 realistic year bonus → {score + score_adjustment}")
+        else:
+            score_adjustment -= 4
+            has_significant_penalty = True
+            logger.debug(f"    -4 unrealistic year penalty → {score + score_adjustment}")
+    except ValueError:
+        score_adjustment -= 5
+        has_significant_penalty = True
+        logger.debug(f"    -5 invalid year penalty → {score + score_adjustment}")
+    
+    return score_adjustment, has_significant_penalty
+
+def validate_volume_field(value, score):
+    """Validates volume field and returns score adjustment"""
+    score_adjustment = 0
+    has_significant_penalty = False
+    
+    MAX_REALISTIC_VOLUME = 100  # Most series don't go beyond this
+    
+    try:
+        vol = float(value)
+        if 1 <= vol <= MAX_REALISTIC_VOLUME:
+            score_adjustment += 1
+            logger.debug(f"    +1 realistic volume bonus → {score + score_adjustment}")
+        else:
+            score_adjustment -= 3
+            logger.debug(f"    -3 unrealistic volume penalty → {score + score_adjustment}")
+    except ValueError:
+        score_adjustment -= 3
+        logger.debug(f"    -3 non-numeric volume penalty → {score + score_adjustment}")
+    
+    # Check for text that belongs in series
+    if re.search(r'[a-zA-Z]{4,}', value):
+        score_adjustment -= 8
+        has_significant_penalty = True
+        logger.debug(f"    -8 text-in-volume penalty → {score + score_adjustment}")
+    
+    return score_adjustment, has_significant_penalty
+
+def validate_year_field(value, score):
+    """Validates year field and returns score adjustment"""
+    score_adjustment = 0
+    has_significant_penalty = False
+    
+    current_year = date.today().year
+    
+    try:
+        year = int(value)
+        if 1900 <= year <= current_year + 5:  # Allow some future dates
+            score_adjustment += 1
+            logger.debug(f"    +1 realistic year bonus → {score + score_adjustment}")
+        else:
+            score_adjustment -= 4
+            has_significant_penalty = True
+            logger.debug(f"    -4 unrealistic year penalty → {score + score_adjustment}")
+    except ValueError:
+        score_adjustment -= 5
+        has_significant_penalty = True
+        logger.debug(f"    -5 invalid year penalty → {score + score_adjustment}")
+    
+    return score_adjustment, has_significant_penalty
+
+def check_field_pollution(match_dict):
+    """Check for data that appears in the wrong fields"""
+    score_adjustment = 0
+    has_significant_penalty = False
+    
+    # Check for Series data in Chapter field
+    chapter = match_dict.get('Chapter', '')
+    if isinstance(chapter, str) and re.search(r'[a-zA-Z]{5,}', chapter):
+        if not re.search(r'(?i)part|side|extra', chapter):
+            score_adjustment -= 15
+            has_significant_penalty = True
+            logger.debug(f"  -15 series text in chapter field")
+    
+    # Check for Chapter data in Series field
+    series = match_dict.get('Series', '') or match_dict.get('Title', '')
+    if isinstance(series, str):
+        # If series ends with something like "Chapter 123"
+        if re.search(r'(?i)chapter\s+\d+$', series.strip()):
+            score_adjustment -= 15
+            has_significant_penalty = True
+            logger.debug(f"  -15 chapter data at end of series field")
+        elif re.search(r'(?i)\bch\.?\s*\d+', series.strip()):
+            score_adjustment -= 15
+            has_significant_penalty = True
+            logger.debug(f"  -15 Ch. indicator in series field")
+        elif re.search(r'\bc\d+\b', series.strip()):
+            score_adjustment -= 15
+            has_significant_penalty = True
+            logger.debug(f"  -15 c### chapter indicator in series field")
+    
+    # Check for Volume data in Series field
+    if isinstance(series, str):
+        # If series has explicit volume indicator
+        vol_match = re.search(r'(?i)\bvol(?:ume)?\s*\d+\b', series)
+        if vol_match and vol_match.group() == series.strip():
+            score_adjustment -= 15
+            has_significant_penalty = True
+            logger.debug(f"  -15 volume-only series field")
+    
+    # Check for Volume data in Chapter field
+    if isinstance(chapter, str) and re.search(r'(?i)\bvol(?:ume)?\s*\d+\b', chapter):
+        if not re.search(r'\d+\s*-\s*\d+', chapter):  # Allow ranges
+            score_adjustment -= 10
+            logger.debug(f"  -10 volume data in chapter field")
+    
+    return score_adjustment, has_significant_penalty
 
 def validate_match(match_dict):
     """Additional validation checks for a matched pattern"""
     for key, value in match_dict.items():
         if isinstance(value, str):
-            if key == 'Extra' and value.startswith('('):
-                return False
+            if key in ('Series', 'Title'):
+                # Only fail for trailing periods that aren't part of abbreviations
+                if value.strip().endswith(('-', ':', '.')) and not is_likely_abbreviation(value.strip()):
+                    logger.debug(f"  validate_match failed: {key} '{value}' ends with invalid character")
+                    return False
                 
-            if key in ('Series', 'Title') and value.strip().endswith(('-', ':', '.', 'Ch.', 'Ch', 'Chapter')):
-                return False
-    
+                if value.strip().endswith(('Ch.', 'Ch', 'Chapter')):
+                    logger.debug(f"  validate_match failed: {key} '{value}' ends with chapter indicator")
+                    return False
+                    
+                if re.fullmatch(r'(?i)(?:vol(?:ume)?|v)\.?\s*\d+', value.strip()):
+                    logger.debug(f"  validate_match failed: {key} '{value}' is just a volume indicator")
+                    return False
+
     return True
+
+def is_likely_abbreviation(text_segment):
+    """Detect if a period is part of a common abbreviation pattern"""
+    # Common business/title abbreviations
+    common_abbr = ['co.', 'ltd.', 'inc.', 'llc.', 'corp.', 'dr.', 'mr.', 'mrs.', 'ms.', 'jr.', 'sr.', 'vs.', 'etc.']
+    
+    # Check for common abbreviations
+    for abbr in common_abbr:
+        if text_segment.lower().endswith(abbr):
+            return True
+    
+    # Check for single letter followed by period (like A., B., etc.)
+    if re.search(r'\b[A-Z]\.\s*', text_segment):
+        return True
+            
+    return False
 
 def match_best_pattern(filename, auto_mode=False):
     global _stored_pattern_choice, _stored_manual_pattern
@@ -367,6 +652,7 @@ def match_best_pattern(filename, auto_mode=False):
             match_dict = match.groupdict()
             # Store pattern name for scoring reference
             match_dict['_pattern_name'] = pattern_name
+            match_dict['_original_filename'] = filename
             score = score_match(match_dict, filename)
             all_matches.append((pattern_name, match_dict, score))
     
@@ -405,12 +691,18 @@ def match_best_pattern(filename, auto_mode=False):
             
             print(f"\n{Fore.WHITE}{i+1}. {Fore.GREEN}Pattern: {Fore.BLUE}{pattern_name} {Fore.WHITE}(Score: {Fore.YELLOW}{score}{Fore.WHITE})")
             print(f"   {Fore.WHITE}Series: {Fore.CYAN}{series}")
-            print(f"   {Fore.WHITE}Chapter: {Fore.CYAN}{chapter}")
+            if 'Volume' in match_dict:
+                volume = match_dict['Volume']
+                print(f"   {Fore.WHITE}Volume: {Fore.CYAN}{volume}")
+            if 'Chapter' in match_dict:
+                chapter = match_dict['Chapter']
+                print(f"   {Fore.WHITE}Chapter: {Fore.CYAN}{chapter}")
         
         print(f"\n{Fore.WHITE}Options:")
         print(f"{Fore.WHITE}• Enter {Fore.YELLOW}1-{min(3, len(all_matches))}{Fore.WHITE} to select a specific match")
         print(f"{Fore.WHITE}• Enter {Fore.YELLOW}A{Fore.WHITE} to use the top match for all similar files")
         print(f"{Fore.WHITE}• Enter {Fore.YELLOW}M{Fore.WHITE} to manually enter series details")
+        print(f"{Fore.WHITE}• Enter {Fore.YELLOW}S{Fore.WHITE} to skip this file")
         
         choice = input(f"\n{Fore.GREEN}➤ Your choice: {Fore.WHITE}").strip()
         
@@ -458,6 +750,11 @@ def match_best_pattern(filename, auto_mode=False):
                 print(f"{Fore.YELLOW}⚠ Could not determine series name from match")
                 return all_matches[0][0], all_matches[0][1]
         
+        # Skip option
+        elif choice.lower() == 's':
+            print(f"{Fore.YELLOW}⚠ Skipping this file.")
+            return (None, None)  # Return None to indicate skipping
+
         try:
             idx = int(choice) - 1
             if 0 <= idx < len(all_matches):
@@ -483,25 +780,22 @@ def match_best_pattern(filename, auto_mode=False):
                 print(f"{Fore.RED}✘ Invalid selection. Using best match.")
                 return all_matches[0][0], all_matches[0][1]
         except ValueError:
-            print(f"{Fore.RED}✘ Invalid input. Using best match.")
-            return all_matches[0][0], all_matches[0][1]
-        except ValueError:
             pass
     
     # If best score is very low, suggest manual entry
     if all_matches and all_matches[0][2] < 5:
-        print(f"\nLow confidence match for: {filename}")
-        print(f"Best match: {all_matches[0][0]} (Score: {all_matches[0][2]})")
-        print(f"Match data: {all_matches[0][1]}")
+        print(f"\n{Fore.YELLOW}⚠ Low confidence match for: {Fore.WHITE}{filename}")
+        print(f"{Fore.WHITE}Best match: {Fore.CYAN}{all_matches[0][0]} {Fore.WHITE}(Score: {Fore.YELLOW}{all_matches[0][2]}{Fore.WHITE})")
+        print(f"{Fore.WHITE}Match data: {Fore.CYAN}{all_matches[0][1]}")
         
-        choice = input("Accept this match? (Y/n/m for manual): ").strip().lower()
+        choice = input(f"{Fore.GREEN}➤ Accept this match? (Y/n/m for manual): {Fore.WHITE}").strip().lower()
         
         if choice == 'n':
             return None
         elif choice == 'm':
-            manual_series = input("Enter series name: ").strip()
-            manual_chapter = input("Enter chapter number (or press Enter to skip): ").strip()
-            manual_volume = input("Enter volume number (or press Enter to skip): ").strip()
+            manual_series = input(f"{Fore.GREEN}➤ Enter series name: {Fore.WHITE}").strip()
+            manual_chapter = input(f"{Fore.GREEN}➤ Enter chapter number (or press Enter to skip): {Fore.WHITE}").strip()
+            manual_volume = input(f"{Fore.GREEN}➤ Enter volume number (or press Enter to skip): {Fore.WHITE}").strip()
             
             match_dict = {'Series': manual_series}
             if manual_chapter:
@@ -516,13 +810,13 @@ def match_best_pattern(filename, auto_mode=False):
         return all_matches[0][0], all_matches[0][1]
     
     # No good matches found
-    print(f"\nNo good matches found for: {filename}")
-    manual_choice = input("Enter 'M' to manually specify details, 'S' to skip this file: ").strip().lower()
+    print(f"\n{Fore.YELLOW}⚠ No good matches found for: {Fore.WHITE}{filename}")
+    manual_choice = input(f"{Fore.GREEN}➤ Enter {Fore.YELLOW}M{Fore.GREEN} to manually specify details, {Fore.YELLOW}S{Fore.GREEN} to skip this file: {Fore.WHITE}").strip().lower()
 
     if manual_choice == 'm':
-        manual_series = input("Enter series name: ").strip()
-        manual_chapter = input("Enter chapter number (or press Enter to skip): ").strip()
-        manual_volume = input("Enter volume number (or press Enter to skip): ").strip()
+        manual_series = input(f"{Fore.GREEN}➤ Enter series name: {Fore.WHITE}").strip()
+        manual_chapter = input(f"{Fore.GREEN}➤ Enter chapter number (or press Enter to skip): {Fore.WHITE}").strip()
+        manual_volume = input(f"{Fore.GREEN}➤ Enter volume number (or press Enter to skip): {Fore.WHITE}").strip()
         
         match_dict = {'Series': manual_series}
         if manual_chapter:
@@ -532,8 +826,8 @@ def match_best_pattern(filename, auto_mode=False):
             
         return ("Manual Entry", match_dict)
     
-    print(f"Skipping file: {filename}")
-    return None
+    print(f"{Fore.YELLOW}⚠ Skipping file: {Fore.WHITE}{filename}")
+    return (None, None)
 
 def extract_rars(folder_path, work_directory):
     """Extract RAR files from a single folder."""
@@ -1055,6 +1349,7 @@ def test_patterns(test_files):
             match = pattern.match(filename)
             if match:
                 match_dict = match.groupdict()
+                match_dict['_pattern_name'] = pattern_name
                 score = score_match(match_dict, filename)
                 matches.append((pattern_name, match_dict, score))
         
