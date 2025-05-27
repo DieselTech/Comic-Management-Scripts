@@ -11,8 +11,8 @@ The --dry-run mode will still record the pattern matches in the database, but it
 Once you have the matching patterns set up, you can run the script with --auto to process files automatically.
 Otherwise, running in interactive mode will also allow you to refine the pattern matches as you go.
 
-Version: 0.9.7
-Updated: 5/15/2025
+Version: 0.9.7.1
+Updated: 5/27/2025
 
 Features:
 --------
@@ -149,6 +149,7 @@ patterns = [
     ('Series_Dash_Ch', re.compile(r'^(?P<Series>.+?)\s-\s(?:Ch|Chapter)\.?\s(?P<Chapter>\d+(?:\.\d+)?)\.?(?:cbz|cbr)?$')),
     ('Series_Ch_Dash_Extra', re.compile(r'^(?P<Series>.+?)\s+Ch\.\s+(?P<Chapter>\d+(?:\.\d+)?)\s+-\s+(?P<Extra>.+)')),
     ('Series_Dot_Ch', re.compile(r'^(?P<Series>.+?)(?=\.\s*(?:Ch\.?|Chapter))\.\s*(?:Ch\.?|Chapter)\s*(?P<Chapter>\d+)(?:\s*-\s*(?P<Extra>.*?))?$')),
+    ('Series_Dot_Vol_Ch_Extra', re.compile(r'^(?P<Series>.+?)\.?\s+Vol\.\s*(?P<Volume>\d+)\s+Ch\.\s*(?P<Chapter>\d+(?:\.\d+)?)\s+-\s+(?P<Extra>.+)')),
     ('Series_Ch_Number', re.compile(r'^(?P<Series>.+?)(?<!\s-)\s(?:Ch\.?|Chapter)\s?(?P<Chapter>\d+(?:\.\d+)?)')),
     ('Series_Chapter', re.compile(r'^(?P<Series>.+?)(?<!\s[Vv]ol)(?<!\sVolume)\sChapter\s(?P<Chapter>\d+(?:\.\d+)?)')),
     ('Series_Vol_Ch', re.compile(r'^(?P<Series>.+?)\sv(?P<Volume>\d+)(?:\s-\s)(?:Ch\.?|Chapter)\s?(?P<Chapter>\d+(?:\.\d+)?)')),
@@ -159,7 +160,7 @@ patterns = [
     ('Chapter', re.compile(r'(?P<Title>.+)\s(?:(?:c|ch|chapter)?\s*(?P<Chapter>\d+(?:\.\d+)?))?(?:\s-\s(?P<Extra>.*?))?\s*(?:\((?P<Year>\d{4})\))?\s*(?:\(Digital\))?\s*(?:\((?P<Source>[^)]+)\))?')),
     ('Simple_Ch', re.compile(r'Chapter(?P<Chapter>\d+(-\d+)?)')),
     ('Vol_Chp', re.compile(r'(?P<Series>.*)(\s|_)(vol\d+)?(\s|_)Chp\.? ?(?P<Chapter>\d+)')),
-    ('V_Ch', re.compile(r'v\d+\.(\s|_)(?P<Chapter>\d+(?:.\d+|-\d+)?)')),
+    ('V_Ch', re.compile(r'v\d+\.(\s|_)(?P<Chapter>\d+(?:.\d+f|-\d+)?)')),
     ('Titled_Vol', re.compile(r'(?P<Series>.*?)\s-\sVol\.\s(?P<Volume>\d+)')),
     ('Bare_Ch', re.compile(r'^((?!v|vo|vol|Volume).)*(\s|_)(?P<Chapter>\.?\d+(?:.\d+|-\d+)?)(?P<Part>b)?(\s|_|\[|\()')),
     ('Vol_Chapter', re.compile(r'(?P<Volume>((vol|volume|v))?(\s|_)?\.?\d+)(\s|_)(Chp|Chapter)\.?(\s|_)?(?P<Chapter>\d+)')),
@@ -1662,7 +1663,6 @@ def process_bulk_archives(root, files, work_directory, library_path, auto_mode, 
             
         return True, processed_files
     else:
-        # Normal processing for non-dry run
         # Extract the RAR files first
         extracted_folders, num_extracted = extract_rars(root, work_directory)
         
@@ -1715,8 +1715,10 @@ def process_bulk_archives(root, files, work_directory, library_path, auto_mode, 
 def convert_to_webp(source_filepath, temp_dir, max_threads=0):
     """Convert images in a CBZ file to WebP format and create a new CBZ."""
     try:
-        # Extract the original archive
+        # Count files in original archive first
+        original_file_count = 0
         with zipfile.ZipFile(source_filepath, 'r') as zip_ref:
+            original_file_count = len(zip_ref.namelist())
             zip_ref.extractall(temp_dir)
         
         # Get a list of all files in the temp directory
@@ -1744,25 +1746,35 @@ def convert_to_webp(source_filepath, temp_dir, max_threads=0):
             else:
                 other_files.append(file_path)
         
-        # Log what we found - use colorama formatting instead of raw logger
         print(f"{Fore.WHITE}        • Found {Fore.CYAN}{len(image_files_to_convert)} images to convert, "
               f"{Fore.CYAN}{len(webp_files)} existing WebP files, and "
               f"{Fore.CYAN}{len(other_files)} other files")
         
-        # Create new WebP archive with maximum compression
+        # Create new WebP archive with no compression
         new_filepath = os.path.join(temp_dir, os.path.basename(source_filepath).replace('.cbz', '_webp.cbz'))
-        with zipfile.ZipFile(new_filepath, 'w', compression=zipfile.ZIP_DEFLATED, 
-                             compresslevel=9) as new_zip:
+        
+        # Initialize counters outside the conditional blocks
+        successful_conversions = 0
+        failed_conversions = []
+        total_files_added = 0
+        
+        with zipfile.ZipFile(new_filepath, 'w', compression=zipfile.ZIP_STORED) as new_zip:
             # Function to convert a single image
             def convert_image(img_path):
                 try:
                     with Image.open(img_path) as img:
+                        # Check for dimensions exceeding WebP limits (16383 × 16383)
+                        if img.width > 16383 or img.height > 16383:
+                            logger.warning(f"Image too large for WebP conversion: {img_path} ({img.width}x{img.height})")
+                            return None, img_path, "Image dimensions exceed WebP limit (16383×16383)"
+                        
                         webp_path = os.path.splitext(img_path)[0] + '.webp'
                         img.save(webp_path, 'WEBP', quality=75)
-                        return webp_path
+                        return webp_path, None, None
                 except Exception as e:
-                    logger.error(f"Error converting image {img_path}: {str(e)}")
-                    return None
+                    error_msg = str(e)
+                    logger.error(f"Error converting image {img_path}: {error_msg}")
+                    return None, img_path, error_msg
             
             # Configure thread count
             if max_threads <= 0:
@@ -1774,8 +1786,6 @@ def convert_to_webp(source_filepath, temp_dir, max_threads=0):
             else:
                 max_workers = max_threads
                 print(f"{Fore.WHITE}        • Using {Fore.CYAN}{max_workers} threads {Fore.WHITE}for conversion")
-            
-            total_files_added = 0
             
             # Set up progress tracking
             with Progress(
@@ -1794,12 +1804,11 @@ def convert_to_webp(source_filepath, temp_dir, max_threads=0):
                     )
                     
                     # Convert images using thread pool
-                    successful_conversions = 0
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         futures = [executor.submit(convert_image, img_path) for img_path in image_files_to_convert]
                         
                         for future in as_completed(futures):
-                            webp_path = future.result()
+                            webp_path, original_path, error = future.result()
                             progress.update(convert_task, advance=1)
                             
                             if webp_path:
@@ -1808,9 +1817,25 @@ def convert_to_webp(source_filepath, temp_dir, max_threads=0):
                                 new_zip.write(webp_path, rel_path)
                                 successful_conversions += 1
                                 total_files_added += 1
+                            elif original_path:
+                                # Conversion failed - add original file to archive
+                                rel_path = os.path.relpath(original_path, temp_dir)
+                                new_zip.write(original_path, rel_path)
+                                failed_conversions.append((original_path, error))
+                                total_files_added += 1
                     
                     print(f"{Fore.WHITE}        • {Fore.GREEN}Converted {successful_conversions} "
                           f"{Fore.WHITE}of {Fore.CYAN}{len(image_files_to_convert)} {Fore.WHITE}images")
+                    
+                    if failed_conversions:
+                        print(f"{Fore.WHITE}        • {Fore.YELLOW}Added {len(failed_conversions)} original images "
+                              f"{Fore.WHITE}due to conversion failures")
+                        # Log the first few failures with reasons
+                        for i, (path, error) in enumerate(failed_conversions[:3]):
+                            filename = os.path.basename(path)
+                            print(f"{Fore.WHITE}          ↳ {Fore.YELLOW}{filename}: {error}")
+                        if len(failed_conversions) > 3:
+                            print(f"{Fore.WHITE}          ↳ {Fore.YELLOW}and {len(failed_conversions) - 3} more...")
                 
                 # Add existing WebP files to the archive
                 if webp_files:
@@ -1843,13 +1868,31 @@ def convert_to_webp(source_filepath, temp_dir, max_threads=0):
                     
                     print(f"{Fore.WHITE}        • {Fore.GREEN}Added {len(other_files)} other files "
                           f"{Fore.WHITE}to the archive")
+        
+        # Verify we added files to the archive
+        if total_files_added == 0:
+            print(f"{Fore.RED}        ❌ No files were added to the new archive!")
+            return None
             
-            # Verify we added files to the archive
-            if total_files_added == 0:
-                print(f"{Fore.RED}        ❌ No files were added to the new archive!")
-                return None
+        # Verify file count integrity
+        with zipfile.ZipFile(new_filepath, 'r') as zip_ref:
+            final_file_count = len(zip_ref.namelist())
             
-            print(f"{Fore.WHITE}        • {Fore.GREEN}Created WebP archive {Fore.WHITE}with {Fore.CYAN}{total_files_added} files")
+        if final_file_count != original_file_count:
+            print(f"{Fore.RED}        ❌ File count mismatch: Original had {original_file_count} files, "
+                  f"but new archive has {final_file_count} files")
+            logger.error(f"File count mismatch in WebP conversion: Original={original_file_count}, "
+                         f"New={final_file_count} for {source_filepath}")
+            return None
+        else:
+            print(f"{Fore.GREEN}        ✓ File count validated: {original_file_count} files")
+        
+        print(f"{Fore.WHITE}        • {Fore.GREEN}Created WebP archive {Fore.WHITE}with:")
+        print(f"{Fore.WHITE}          • {Fore.GREEN}{successful_conversions} WebP converted images")
+        print(f"{Fore.WHITE}          • {Fore.YELLOW}{len(failed_conversions)} original images (conversion failed)")
+        print(f"{Fore.WHITE}          • {Fore.CYAN}{len(webp_files)} existing WebP files")
+        print(f"{Fore.WHITE}          • {Fore.CYAN}{len(other_files)} other files")
+        print(f"{Fore.WHITE}          • {Fore.GREEN}{total_files_added} total files")
         
         # Final size check - reject suspiciously small files
         if os.path.getsize(new_filepath) < 1024:  # Smaller than 1KB is probably corrupt
@@ -2578,7 +2621,7 @@ def list_recent_runs():
         conn.close()
 
 def undo_processing_run(run_id):
-    """Undo a processing run by removing files from the library"""
+    """Undo a processing run by removing files from the library and restoring original folder structure"""
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -2603,7 +2646,7 @@ def undo_processing_run(run_id):
         print(f"{Fore.CYAN}{'='*60}")
         
         print(f"\n{Fore.WHITE}This will remove {Fore.YELLOW}{len(files)} files {Fore.WHITE}from your library.")
-        print(f"{Fore.YELLOW}Warning: Original source files may no longer exist.")
+        print(f"{Fore.WHITE}It will also restore folders and files from the !Finished directory.")
         
         # Show sample of files to be removed
         sample_size = min(10, len(files))
@@ -2620,6 +2663,43 @@ def undo_processing_run(run_id):
         if confirm != 'y':
             print(f"{Fore.YELLOW}Undo operation cancelled.")
             return False
+        
+        # Identify source directories and possible download directories
+        source_dirs = set()
+        download_dirs = set()
+        source_paths_by_dir = {}
+        
+        for file_id, source_path, _ in files:
+            if not source_path:
+                continue
+                
+            source_dir = os.path.dirname(source_path)
+            if source_dir:
+                source_dirs.add(source_dir)
+                
+                # Group source paths by directory for folder restoration
+                if source_dir not in source_paths_by_dir:
+                    source_paths_by_dir[source_dir] = []
+                source_paths_by_dir[source_dir].append(source_path)
+                
+                # Add potential download directories
+                parent_dir = os.path.dirname(source_dir)
+                if parent_dir:
+                    download_dirs.add(parent_dir)
+        
+        # Create recovery folder for files that can't be restored to original location
+        recovery_dir = None
+        if download_dirs:
+            main_download_dir = sorted(download_dirs, key=len)[0]  # Use shortest path as main
+            recovery_dir = os.path.join(main_download_dir, f"!Recovered_{run_id[:8]}")
+            os.makedirs(recovery_dir, exist_ok=True)
+            print(f"{Fore.CYAN}Created recovery directory: {recovery_dir}")
+        else:
+            # If no download dirs found, create recovery in same directory as script
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            recovery_dir = os.path.join(script_dir, f"!Recovered_{run_id[:8]}")
+            os.makedirs(recovery_dir, exist_ok=True)
+            print(f"{Fore.CYAN}Created recovery directory: {recovery_dir}")
         
         # Remove files from library
         print(f"\n{Fore.CYAN}Removing files from library...")
@@ -2659,20 +2739,162 @@ def undo_processing_run(run_id):
             except Exception as e:
                 print(f"{Fore.YELLOW}⚠️ Could not remove directory {series_dir}: {str(e)}")
         
+        # First attempt to restore entire folders
+        print(f"\n{Fore.CYAN}Restoring folders from !Finished directory...")
+        restored_folders = set()
+        folder_recovery_count = 0
+        
+        # Identify potential processed folders in the !Finished directory
+        potential_folders = {}
+        for download_dir in download_dirs:
+            finished_dir = os.path.join(download_dir, "!Finished")
+            if os.path.exists(finished_dir):
+                for item in os.listdir(finished_dir):
+                    item_path = os.path.join(finished_dir, item)
+                    if os.path.isdir(item_path):
+                        # Store path and parent directory for reference
+                        potential_folders[item] = {
+                            'path': item_path,
+                            'parent': download_dir
+                        }
+        
+        # Try to match and restore folders
+        for source_dir in source_dirs:
+            dir_name = os.path.basename(source_dir)
+            parent_dir = os.path.dirname(source_dir)
+            
+            # Skip if this folder has already been restored
+            if source_dir in restored_folders:
+                continue
+                
+            # Check if the folder exists in the !Finished directory
+            if dir_name in potential_folders:
+                finished_folder = potential_folders[dir_name]
+                # Only restore if the parent directories match
+                expected_parent = finished_folder['parent']
+                
+                if parent_dir == expected_parent:
+                    try:
+                        if os.path.exists(source_dir):
+                            print(f"{Fore.YELLOW}⚠️ Destination folder already exists: {source_dir}")
+                            temp_name = f"{source_dir}_recovered_{run_id[:8]}"
+                            shutil.move(finished_folder['path'], temp_name)
+                            print(f"{Fore.YELLOW}  ↳ Restored to alternate location: {temp_name}")
+                        else:
+                            # Create parent directory if it doesn't exist
+                            os.makedirs(parent_dir, exist_ok=True)
+                            # Restore the entire folder structure
+                            shutil.move(finished_folder['path'], source_dir)
+                            print(f"{Fore.GREEN}✓ Restored folder: {dir_name} to original location")
+                            
+                        restored_folders.add(source_dir)
+                        folder_recovery_count += 1
+                        
+                        # Prevent individual file processing for files in this folder
+                        for src_path in source_paths_by_dir.get(source_dir, []):
+                            restored_folders.add(src_path)
+                        
+                    except Exception as e:
+                        print(f"{Fore.RED}✘ Error restoring folder {dir_name}: {str(e)}")
+        
+        # Process individual files that couldn't be restored with folders
+        print(f"\n{Fore.CYAN}Recovering individual files from !Finished folder...")
+        recovered_count = 0
+        recovery_count = 0
+        
+        for file_id, source_path, dest_path in files:
+            # Skip if already handled as part of a folder restoration
+            if source_path in restored_folders:
+                continue
+                
+            # Get filename and try to find it in !Finished folders
+            filename = os.path.basename(source_path)
+            source_dir = os.path.dirname(source_path)
+            
+            # Check if source directory exists
+            if not os.path.exists(source_dir):
+                source_dir = None
+            
+            # First, try exact !Finished location
+            finished_path = None
+            
+            # Check for file in !Finished folder in same directory as source
+            if source_dir:
+                finished_dir = os.path.join(os.path.dirname(source_dir), "!Finished")
+                if os.path.exists(finished_dir):
+                    # Check both for the file and any containing folder with that file
+                    possible_file = os.path.join(finished_dir, filename)
+                    if os.path.exists(possible_file) and os.path.isfile(possible_file):
+                        finished_path = possible_file
+                    
+                    # Check if the file might be in a subfolder of !Finished
+                    if not finished_path:
+                        for root, _, files in os.walk(finished_dir):
+                            if filename in files:
+                                finished_path = os.path.join(root, filename)
+                                break
+            
+            # If not found, try searching in all download directories
+            if not finished_path:
+                for download_dir in download_dirs:
+                    finished_dir = os.path.join(download_dir, "!Finished")
+                    if os.path.exists(finished_dir):
+                        possible_file = os.path.join(finished_dir, filename)
+                        if os.path.exists(possible_file) and os.path.isfile(possible_file):
+                            finished_path = possible_file
+                            break
+                            
+                        # Check subfolders too
+                        for root, _, files in os.walk(finished_dir):
+                            if filename in files:
+                                finished_path = os.path.join(root, filename)
+                                break
+                    
+                    if finished_path:
+                        break
+            
+            # If found, try to move it back
+            if finished_path:
+                try:
+                    if source_dir and os.path.exists(source_dir):
+                        # Move back to original directory
+                        dest_file = os.path.join(source_dir, filename)
+                        shutil.move(finished_path, dest_file)
+                        print(f"{Fore.GREEN}  ✓ Restored file: {filename} to original location")
+                        recovered_count += 1
+                    elif recovery_dir:
+                        # Move to recovery directory
+                        dest_file = os.path.join(recovery_dir, filename)
+                        shutil.move(finished_path, dest_file)
+                        print(f"{Fore.YELLOW}  ⚠️ Moved to recovery dir: {filename}")
+                        recovery_count += 1
+                    else:
+                        print(f"{Fore.YELLOW}  ⚠️ No recovery directory available for: {filename}")
+                except Exception as e:
+                    print(f"{Fore.RED}  ✘ Error recovering file {filename}: {str(e)}")
+        
         conn.commit()
         
         print(f"\n{Fore.GREEN}{'='*60}")
         print(f"{Fore.GREEN}✅ UNDO COMPLETE")
         print(f"{Fore.GREEN}{'='*60}")
         
-        print(f"\n{Fore.WHITE}• Removed {Fore.GREEN}{removed_count} files")
+        print(f"\n{Fore.WHITE}• Removed {Fore.GREEN}{removed_count} files {Fore.WHITE}from library")
         print(f"{Fore.WHITE}• Cleaned {Fore.GREEN}{cleaned_dirs} empty directories")
+        if folder_recovery_count > 0:
+            print(f"{Fore.WHITE}• Restored {Fore.GREEN}{folder_recovery_count} folders {Fore.WHITE}to original locations")
+        print(f"{Fore.WHITE}• Restored {Fore.GREEN}{recovered_count} individual files {Fore.WHITE}to original locations")
+        if recovery_count > 0:
+            print(f"{Fore.WHITE}• Moved {Fore.YELLOW}{recovery_count} files {Fore.WHITE}to recovery folder")
+        if recovery_dir:
+            print(f"{Fore.WHITE}• Recovery folder: {Fore.CYAN}{recovery_dir}")
         if failed_count > 0:
             print(f"{Fore.WHITE}• Failed to remove {Fore.YELLOW}{failed_count} files")
         
         return True
     except Exception as e:
         print(f"{Fore.RED}Error undoing processing run: {str(e)}")
+        logger.error(f"Error undoing processing run: {str(e)}", exc_info=True)
         conn.rollback()
         return False
     finally:
@@ -3053,7 +3275,7 @@ if __name__ == '__main__':
     print(f"{Fore.CYAN}{'='*60}")
     
     # Show version information
-    version = "0.9.6"
+    version = "0.9.7.1"
     print(f"\n{Fore.WHITE}Version: {Fore.GREEN}{version}")
     print(f"{Fore.WHITE}Session ID: {Fore.YELLOW}{run_id[:8]}...")
     
