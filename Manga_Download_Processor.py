@@ -11,8 +11,8 @@ The --dry-run mode will still record the pattern matches in the database, but it
 Once you have the matching patterns set up, you can run the script with --auto to process files automatically.
 Otherwise, running in interactive mode will also allow you to refine the pattern matches as you go.
 
-Version: 0.9.7.1
-Updated: 5/27/2025
+Version: 0.9.8.0
+Updated: 10/09/2025
 
 Features:
 --------
@@ -48,6 +48,7 @@ Arguments:
   --test-db           Test database matches against files without processing them
   --undo              Undo a previous processing run
   --clear-patterns    Clear all stored pattern matches from the database
+  --preserve-filename, -p  Keep original filename instead of renaming based on series/chapter/volume
   
 Examples:
 --------
@@ -65,6 +66,9 @@ python Manga_Download_Processor.py --auto --source /path/to/downloads --dest /pa
 
 # Process using specific mode:
 python Manga_Download_Processor.py --mode bulk --source /path/to/downloads --dest /path/to/library
+
+# Keep original filenames instead of renaming:
+python Manga_Download_Processor.py --preserve-filename --source /path/to/downloads --dest /path/to/library
 
 # View database statistics:
 python Manga_Download_Processor.py --db-stats
@@ -226,7 +230,7 @@ def move_to_finished(download_directory):
         destination_folder = os.path.join(finished_dir, folder)
 
         # Skip special folders
-        if folder in ["!Finished", "!temp_processing", "!temp_extract"]:
+        if folder in ["!Finished", "!temp_processing", "!temp_extract", "!Conflicts"]:
             continue
         
         if os.path.isdir(source_folder):
@@ -602,9 +606,8 @@ def validate_match(match_dict):
                 # Check if trailing dash is likely part of a "word-word-" pattern
                 if value.strip().endswith('-'):
                     # For series names, just check if there's enough content before the dash
-                    # This is more permissive and handles a wider range of title formats
                     if len(value.strip()) > 5:  # If there's a reasonable amount of content
-                        continue  # Accept trailing dash for series names with decent length
+                        continue
                 
                 # Only fail for trailing periods that aren't part of abbreviations
                 if value.strip().endswith(('-', ':', '.')) and not is_likely_abbreviation(value.strip()):
@@ -646,6 +649,7 @@ def match_best_pattern(filename, auto_mode=False):
         
     Returns:
         Tuple of (pattern_name, match_dict) or None if no match
+        Special return value: ("SKIP_TO_FOLDER", None) to indicate file should be moved to !Skipped
     """
     global _stored_pattern_choice, _stored_manual_pattern, _stored_skip_series
     
@@ -655,7 +659,11 @@ def match_best_pattern(filename, auto_mode=False):
     if _stored_skip_series and filename.startswith(_stored_skip_series['series_prefix']):
         logger.debug(f"Automatically skipping file from series: {_stored_skip_series['series']}")
         print(f"{Fore.YELLOW}⚠ Automatically skipping: {filename}")
-        return None
+        # Return special marker to indicate this file should be moved to !Skipped
+        if _stored_skip_series.get('skip_to_folder'):
+            return "SKIP_TO_FOLDER", None
+        else:
+            return None
 
     # Extract potential series name for comparison and clearing checks
     potential_series = extract_series_name(filename)
@@ -1067,7 +1075,8 @@ def handle_multiple_matches(filename, all_matches):
             global _stored_skip_series
             _stored_skip_series = {
                 'series': best_series,
-                'series_prefix': best_series
+                'series_prefix': best_series,
+                'skip_to_folder': True  # Flag to indicate files should be moved to !Skipped
             }
             
             logger.info(f"User chose to skip all files from series: {best_series}")
@@ -1215,22 +1224,24 @@ def handle_no_matches(filename):
                 global _stored_skip_series
                 _stored_skip_series = {
                     'series': potential_series,
-                    'series_prefix': potential_series
+                    'series_prefix': potential_series,
+                    'skip_to_folder': True  # Flag to move files to !Skipped
                 }
                 
                 logger.info(f"User chose to skip all files from series: {potential_series}")
-                return None
+                return "SKIP_TO_FOLDER", None
             else:
                 # Let them enter the series name manually
                 skip_series = input(f"{Fore.GREEN}➤ Enter series name to skip: {Fore.WHITE}").strip()
                 if skip_series:
                     _stored_skip_series = {
                         'series': skip_series,
-                        'series_prefix': skip_series
+                        'series_prefix': skip_series,
+                        'skip_to_folder': True  # Flag to move files to !Skipped
                     }
                     
                     logger.info(f"User chose to skip all files from series: {skip_series}")
-                    return None
+                    return "SKIP_TO_FOLDER", None
 
 _stored_format_types = {}  # {'series_name': {'has_volume': bool, 'has_chapter': bool}}
 
@@ -1328,7 +1339,7 @@ def extract_rars(folder_path, work_directory):
             
     return extracted_folders, num_extracted
 
-def process_directory(download_directory, library_path, work_directory, dry_run=False, auto_mode=False, process_mode="standard", max_threads=0):
+def process_directory(download_directory, library_path, work_directory, dry_run=False, auto_mode=False, process_mode="standard", max_threads=0, preserve_filename=False):
     """Process manga files and move completed series folders to !Finished."""
     print(f"\n{Fore.CYAN}{'='*60}")
     print(f"{Fore.CYAN}🚀 PROCESSING COMICS")
@@ -1346,6 +1357,7 @@ def process_directory(download_directory, library_path, work_directory, dry_run=
     success = True
     processed_files_count = 0
     processed_folders_count = 0
+    skipped_folders_count = 0
     
     # Create necessary directories in work_directory instead of download_directory
     temp_processing_dir = os.path.join(work_directory, "temp_processing")
@@ -1360,23 +1372,36 @@ def process_directory(download_directory, library_path, work_directory, dry_run=
     print(f"\n{Fore.CYAN}📂 SCANNING DIRECTORIES...")
     folder_count = 0
     
-    # Create !Finished directory upfront
+    # Create !Finished and !Skipped directories upfront
     finished_dir = os.path.join(download_directory, "!Finished")
+    skipped_dir = os.path.join(download_directory, "!Skipped")
     if not dry_run:
         os.makedirs(finished_dir, exist_ok=True)
+        os.makedirs(skipped_dir, exist_ok=True)
     
     root_processed_files = []
+    root_skipped_files = []
 
+    # First, collect all directories to process (to avoid modifying directory structure during iteration)
+    directories_to_process = []
     for root, _, files in os.walk(download_directory):
-        if any(special in root for special in ["!Finished", "!temp_processing", "!temp_extract"]):
+        if any(special in root for special in ["!Finished", "!temp_processing", "!temp_extract", "!Skipped"]):
             continue
             
         cbz_files = [f for f in files if f.endswith('.cbz')]
         rar_files = [f for f in files if f.endswith('.rar')]
         
-        if not cbz_files and not rar_files:
+        if cbz_files or rar_files:
+            directories_to_process.append((root, files, cbz_files, rar_files))
+    
+    print(f"{Fore.WHITE}Found {Fore.GREEN}{len(directories_to_process)} directories to process")
+
+    # Now process each directory
+    for root, files, cbz_files, rar_files in directories_to_process:
+        # Skip if the directory no longer exists (might have been moved already)
+        if not os.path.exists(root):
             continue
-        
+            
         folder_count += 1
         print(f"\n{Fore.WHITE}Processing folder {folder_count}: {Fore.YELLOW}{os.path.basename(root)}")
         print(f"{Fore.WHITE}  • Found: {Fore.GREEN}{len(cbz_files)} CBZ files, {Fore.GREEN}{len(rar_files)} RAR files")
@@ -1388,52 +1413,92 @@ def process_directory(download_directory, library_path, work_directory, dry_run=
             print(f"{Fore.WHITE}  • Auto-detected mode: {Fore.YELLOW}{folder_process_mode}")
         
         processed_file_list = []
+        folder_was_skipped = False
+        
         if folder_process_mode == "bulk" and rar_files:
-            process_result, processed_file_list = process_bulk_archives(root, files, work_directory, library_path, auto_mode, dry_run, max_threads)
+            process_result, processed_file_list = process_bulk_archives(root, files, work_directory, library_path, auto_mode, dry_run, max_threads, preserve_filename)
         elif cbz_files:
-            process_result, processed_file_list = process_individual_files(root, files, work_directory, library_path, auto_mode, dry_run, max_threads)
+            process_result, processed_file_list = process_individual_files(root, files, work_directory, library_path, auto_mode, dry_run, max_threads, preserve_filename)
         else:
             print(f"{Fore.YELLOW}  ⚠ No processable files for mode {folder_process_mode}")
             process_result = False
             
+        # Check if the entire folder was skipped (all files returned SKIP_TO_FOLDER)
         if processed_file_list:
-            print(f"{Fore.GREEN}  ✓ Processed {len(processed_file_list)} files")
-            processed_files_count += len(processed_file_list)
-            
-            if root == download_directory:
-                root_processed_files.extend(processed_file_list)
+            # Check if we have evidence of skipping by looking for global skip state
+            global _stored_skip_series
+            if (_stored_skip_series and 
+                _stored_skip_series.get('skip_to_folder') and 
+                len(processed_file_list) == len(cbz_files + rar_files)):
+                folder_was_skipped = True
+                print(f"{Fore.YELLOW}  ⚠ Entire folder skipped (series: {_stored_skip_series['series']})")
+            else:
+                print(f"{Fore.GREEN}  ✓ Processed {len(processed_file_list)} files")
+                processed_files_count += len(processed_file_list)
         else:
             print(f"{Fore.YELLOW}  ⚠ No files were processed")
         
-        # Move the folder to !Finished immediately if it was processed successfully
+        # Move the folder to appropriate destination immediately if it was processed/skipped successfully
         # and it's not the main download directory
-        if not dry_run and root != download_directory and process_result:
+        if not dry_run and root != download_directory and (process_result or folder_was_skipped):
             folder_name = os.path.basename(root)
-            dest_path = os.path.join(finished_dir, folder_name)
-            try:
-                print(f"{Fore.GREEN}  ✓ Moving folder to !Finished: {folder_name}")
-                shutil.move(root, dest_path)
-                processed_folders_count += 1
-                logger.debug(f"Moved processed folder to !Finished: {folder_name}")
-            except Exception as e:
-                print(f"{Fore.RED}  ✘ Error moving folder {folder_name}: {str(e)}")
-                logger.error(f"Error moving folder {folder_name} to !Finished: {str(e)}")
-        
-    if not dry_run and root_processed_files:
-        os.makedirs(finished_dir, exist_ok=True)
-        
-        print(f"\n{Fore.CYAN}📦 Moving processed loose files")
-        for filename in root_processed_files:
-            source_path = os.path.join(download_directory, filename)
-            if os.path.exists(source_path):
+            
+            if folder_was_skipped:
+                dest_path = os.path.join(skipped_dir, folder_name)
                 try:
-                    dest_path = os.path.join(finished_dir, filename)
-                    shutil.move(source_path, dest_path)
-                    print(f"{Fore.GREEN}  ✓ Moved to !Finished: {filename}")
-                    logger.info(f"Moved processed loose file to !Finished: {filename}")
+                    print(f"{Fore.YELLOW}  ✓ Moving folder to !Skipped: {folder_name}")
+                    shutil.move(root, dest_path)
+                    skipped_folders_count += 1
+                    logger.debug(f"Moved skipped folder to !Skipped: {folder_name}")
                 except Exception as e:
-                    print(f"{Fore.RED}  ✘ Error moving file {filename}: {str(e)}")
-                    logger.error(f"Error moving loose file {filename}: {str(e)}")
+                    print(f"{Fore.RED}  ✘ Error moving folder {folder_name} to !Skipped: {str(e)}")
+                    logger.error(f"Error moving folder {folder_name} to !Skipped: {str(e)}")
+            else:
+                dest_path = os.path.join(finished_dir, folder_name)
+                try:
+                    print(f"{Fore.GREEN}  ✓ Moving folder to !Finished: {folder_name}")
+                    shutil.move(root, dest_path)
+                    processed_folders_count += 1
+                    logger.debug(f"Moved processed folder to !Finished: {folder_name}")
+                except Exception as e:
+                    print(f"{Fore.RED}  ✘ Error moving folder {folder_name}: {str(e)}")
+                    logger.error(f"Error moving folder {folder_name} to !Finished: {str(e)}")
+            
+            if root == download_directory:
+                if folder_was_skipped:
+                    root_skipped_files.extend(processed_file_list)
+                else:
+                    root_processed_files.extend(processed_file_list)
+        
+    # Handle root directory files
+    if not dry_run and (root_processed_files or root_skipped_files):
+        if root_processed_files:
+            print(f"\n{Fore.CYAN}📦 Moving processed loose files")
+            for filename in root_processed_files:
+                source_path = os.path.join(download_directory, filename)
+                if os.path.exists(source_path):
+                    try:
+                        dest_path = os.path.join(finished_dir, filename)
+                        shutil.move(source_path, dest_path)
+                        print(f"{Fore.GREEN}  ✓ Moved to !Finished: {filename}")
+                        logger.info(f"Moved processed loose file to !Finished: {filename}")
+                    except Exception as e:
+                        print(f"{Fore.RED}  ✘ Error moving file {filename}: {str(e)}")
+                        logger.error(f"Error moving loose file {filename}: {str(e)}")
+        
+        if root_skipped_files:
+            print(f"\n{Fore.YELLOW}📦 Moving skipped loose files")
+            for filename in root_skipped_files:
+                source_path = os.path.join(download_directory, filename)
+                if os.path.exists(source_path):
+                    try:
+                        dest_path = os.path.join(skipped_dir, filename)
+                        shutil.move(source_path, dest_path)
+                        print(f"{Fore.YELLOW}  ✓ Moved to !Skipped: {filename}")
+                        logger.info(f"Moved skipped loose file to !Skipped: {filename}")
+                    except Exception as e:
+                        print(f"{Fore.RED}  ✘ Error moving file {filename}: {str(e)}")
+                        logger.error(f"Error moving loose file {filename}: {str(e)}")
     
     # Show summary but don't move folders (they're already moved)
     if not dry_run:
@@ -1443,6 +1508,8 @@ def process_directory(download_directory, library_path, work_directory, dry_run=
         
         print(f"\n{Fore.WHITE}• Processed {Fore.GREEN}{processed_files_count} files")
         print(f"{Fore.WHITE}• Completed {Fore.GREEN}{processed_folders_count} folders")
+        if skipped_folders_count > 0:
+            print(f"{Fore.WHITE}• Skipped {Fore.YELLOW}{skipped_folders_count} folders")
     else:
         print(f"\n{Fore.YELLOW}📋 DRY RUN COMPLETED - No files were modified")
 
@@ -1491,7 +1558,7 @@ def query_space_saved(run_id):
     else:
         return 0
     
-def process_individual_files(root, files, work_directory, library_path, auto_mode, dry_run, max_threads=0):
+def process_individual_files(root, files, work_directory, library_path, auto_mode, dry_run, max_threads=0, preserve_filename=False):
     """Process individual CBZ files directly"""
     cbz_files = [f for f in files if f.endswith('.cbz')]
     
@@ -1499,13 +1566,17 @@ def process_individual_files(root, files, work_directory, library_path, auto_mod
         return False, []
     
     processed_files = []
+    skipped_files = []
     success = True
 
     # Create !Finished directory if it's the root directory
     finished_dir = None
+    skipped_dir = None
     if root == download_directory and not dry_run:
         finished_dir = os.path.join(download_directory, "!Finished")
+        skipped_dir = os.path.join(download_directory, "!Skipped")
         os.makedirs(finished_dir, exist_ok=True)
+        os.makedirs(skipped_dir, exist_ok=True)
 
     for cbz_file in cbz_files:
         filename = cbz_file
@@ -1514,6 +1585,24 @@ def process_individual_files(root, files, work_directory, library_path, auto_mod
             match_result = match_best_pattern(filename, auto_mode)
             if match_result is None:
                 print(f"{Fore.YELLOW}    ⚠ Skipping: {filename} (no match)")
+                continue
+            
+            # Check for skip-to-folder marker
+            if match_result[0] == "SKIP_TO_FOLDER":
+                print(f"{Fore.YELLOW}    ⚠ Skipping to folder: {filename}")
+                skipped_files.append(cbz_file)
+                
+                if not dry_run and skipped_dir:
+                    source_path = os.path.join(root, cbz_file)
+                    if os.path.exists(source_path):
+                        try:
+                            dest_path = os.path.join(skipped_dir, cbz_file)
+                            shutil.move(source_path, dest_path)
+                            print(f"{Fore.YELLOW}    ✓ Moved to !Skipped: {cbz_file}")
+                            logger.info(f"Moved skipped file to !Skipped: {cbz_file}")
+                        except Exception as e:
+                            print(f"{Fore.RED}    ✘ Error moving file to !Skipped: {str(e)}")
+                            logger.error(f"Error moving file {cbz_file} to !Skipped: {str(e)}")
                 continue
                 
             match_type, match_dict = match_result
@@ -1528,12 +1617,17 @@ def process_individual_files(root, files, work_directory, library_path, auto_mod
             series = match_dict.get('Title') or match_dict.get('Series')
             destination = os.path.join(library_path, series)
             
-            file_name = series
-            if match_dict.get('Volume'):
-                file_name += f" v{match_dict.get('Volume')}"
-            if match_dict.get('Chapter'):
-                file_name += f" - Chapter {match_dict.get('Chapter')}"
-            file_name += ".cbz"
+            if preserve_filename:
+                # Keep the original filename
+                file_name = filename
+            else:
+                # Generate filename based on series/chapter/volume info
+                file_name = series
+                if match_dict.get('Volume'):
+                    file_name += f" v{match_dict.get('Volume')}"
+                if match_dict.get('Chapter'):
+                    file_name += f" - Chapter {match_dict.get('Chapter')}"
+                file_name += ".cbz"
             
             dest_path = os.path.join(destination, file_name)
             
@@ -1547,7 +1641,7 @@ def process_individual_files(root, files, work_directory, library_path, auto_mod
                 processed_files.append(cbz_file)
             else:
                 # Process the CBZ file (actual operations)
-                result = process_cbz_file(os.path.join(root, cbz_file), work_directory, library_path, match_dict, max_threads)
+                result = process_cbz_file(os.path.join(root, cbz_file), work_directory, library_path, match_dict, max_threads, preserve_filename)
                 if result:
                     processed_files.append(cbz_file)
                     print(f"{Fore.GREEN}    ✓ Successfully processed")
@@ -1571,9 +1665,11 @@ def process_individual_files(root, files, work_directory, library_path, auto_mod
             print(f"{Fore.RED}    ❌ Error processing {filename}: {str(e)}")
             success = False
     
-    return success, processed_files
+    # Add skipped files to the return list so they're counted as "processed" for folder handling
+    all_handled_files = processed_files + skipped_files
+    return success, all_handled_files
 
-def process_bulk_archives(root, files, work_directory, library_path, auto_mode, dry_run, max_threads=0):
+def process_bulk_archives(root, files, work_directory, library_path, auto_mode, dry_run, max_threads=0, preserve_filename=False):
     """Process RAR files containing multiple CBZs"""
     rar_files = [f for f in files if f.endswith('.rar')]
     
@@ -1697,7 +1793,7 @@ def process_bulk_archives(root, files, work_directory, library_path, auto_mode, 
                             continue
 
                         # Process extracted CBZ file
-                        result = process_cbz_file(filepath, work_directory, library_path, match_dict, max_threads)
+                        result = process_cbz_file(filepath, work_directory, library_path, match_dict, max_threads, preserve_filename)
                         success = success and result
                     except Exception as e:
                         logger.error(f"Error processing extracted file {filepath}: {str(e)}")
@@ -1904,7 +2000,7 @@ def convert_to_webp(source_filepath, temp_dir, max_threads=0):
         print(f"{Fore.RED}        ❌ Error converting to WebP: {str(e)}")
         return None
 
-def process_cbz_file(filepath, work_dir, library_path, match_dict, max_threads=0):
+def process_cbz_file(filepath, work_dir, library_path, match_dict, max_threads=0, preserve_filename=False):
     """Process a single CBZ file with isolated temp directory."""
     try:
         # Create a unique subfolder for this file
@@ -1964,8 +2060,11 @@ def process_cbz_file(filepath, work_dir, library_path, match_dict, max_threads=0
             
         print(f"{Fore.WHITE}      • Moving to library: {Fore.GREEN}{dest_info}")
 
+        # Store the original filename for preserve_filename functionality
+        original_filename = os.path.basename(filepath) if preserve_filename else None
+
         # Pass the is_oneshot flag to move_to_library
-        dest_path = move_to_library(file_to_move, library_path, series, volume, chapter, is_oneshot=is_oneshot)
+        dest_path = move_to_library(file_to_move, library_path, series, volume, chapter, is_oneshot=is_oneshot, preserve_filename=preserve_filename, original_filename=original_filename)
         if dest_path:
             print(f"{Fore.GREEN}      ✓ File moved successfully to library")
         else:
@@ -2005,36 +2104,42 @@ def series_exists(library_path, series_name):
     series_path = os.path.join(library_path, series_name)
     return os.path.exists(series_path)
 
-def move_to_library(source_file, library_path, series_name, volume=None, chapter=None, download_directory=None, is_oneshot=False):
+def move_to_library(source_file, library_path, series_name, volume=None, chapter=None, download_directory=None, is_oneshot=False, preserve_filename=False, original_filename=None):
     # Before we create the filename, validate the volume/chapter information
-    # Force detect volume information if it's in the filename but not in the match_dict
     source_filename = os.path.basename(source_file)
     if not volume and re.search(r'\bv(?:ol)?\.?\s*(\d+)\b', source_filename, re.IGNORECASE):
         vol_match = re.search(r'\bv(?:ol)?\.?\s*(\d+)\b', source_filename, re.IGNORECASE)
         volume = vol_match.group(1)
         logger.warning(f"Volume information forced from filename: v{volume} (missing in pattern match)")
         print(f"{Fore.YELLOW}    ⚠ Volume information extracted directly from filename: v{volume}")
-        
-        # If the chapter is a year (like 2023), it's probably incorrect - clear it
         if chapter and chapter.isdigit() and int(chapter) > 1900 and int(chapter) < 2100:
-            if re.search(r'\(\d{4}\)', source_filename):  # Confirm it's likely a year in parentheses
+            if re.search(r'\(\d{4}\)', source_filename):
                 logger.warning(f"Cleared likely incorrect chapter number (year): {chapter}")
                 print(f"{Fore.YELLOW}    ⚠ Cleared likely incorrect chapter number (year): {chapter}")
                 chapter = None
-    
-    series_path = os.path.join(library_path, series_name)
 
+    series_path = os.path.join(library_path, series_name)
     if not os.path.exists(series_path):
         os.makedirs(series_path)
 
-    file_name = series_name
-    if volume:
-        file_name += f" v{volume}"
-    if is_oneshot:
-        file_name += " - One-shot"
-    elif chapter:  # Only add chapter if not a one-shot
-        file_name += f" - Chapter {chapter}"
-    file_name += os.path.splitext(source_file)[1]
+    if preserve_filename:
+        # Keep the original filename
+        if original_filename:
+            file_name = original_filename
+        else:
+            file_name = os.path.basename(source_file)
+        print(f"{Fore.WHITE}        • Preserving original filename: {Fore.CYAN}{file_name}")
+        logger.info(f"Preserving original filename: {file_name}")
+    else:
+        # Generate filename based on series/chapter/volume info
+        file_name = series_name
+        if volume:
+            file_name += f" v{volume}"
+        if is_oneshot:
+            file_name += " - One-shot"
+        elif chapter:
+            file_name += f" - Chapter {chapter}"
+        file_name += os.path.splitext(source_file)[1]
 
     dest_path = os.path.join(series_path, file_name)
     print(f"{Fore.WHITE}        • Destination: {Fore.CYAN}{dest_path}")
@@ -2043,33 +2148,26 @@ def move_to_library(source_file, library_path, series_name, volume=None, chapter
     source_dir = os.path.dirname(source_file)
     is_root_file = os.path.samefile(source_dir, os.path.dirname(os.path.abspath(source_file)))
 
+    # Conflict handling: move to !Conflicts folder in download_directory if file exists
     if os.path.exists(dest_path):
-        # Handle file already exists cases
-        if re.search(r'\(F\d?\)', os.path.basename(source_file)):
-            os.remove(dest_path)
-            shutil.move(source_file, dest_path)
-            print(f"{Fore.GREEN}        ✓ Replaced existing file with fixed version")
-        elif download_directory:  # Only use if provided
-            # Move to conflicts folder with unique name
+        # Always move to !Conflicts folder in download_directory
+        conflicts_path = None
+        if download_directory:
             conflicts_path = os.path.join(download_directory, "!Conflicts")
-            if not os.path.exists(conflicts_path):
-                os.makedirs(conflicts_path)
-            conflict_dest_path = os.path.join(conflicts_path, file_name)
-            counter = 1
-            while os.path.exists(conflict_dest_path):
-                base, ext = os.path.splitext(file_name)
-                conflict_dest_path = os.path.join(conflicts_path, f"{base}_{counter}{ext}")
-                counter += 1
-            print(f"{Fore.YELLOW}        ⚠ File already exists. Moving to: {Fore.CYAN}{conflict_dest_path}")
-            dest_path = conflict_dest_path
         else:
-            base, ext = os.path.splitext(dest_path)
-            counter = 1
-            while os.path.exists(dest_path):
-                dest_path = f"{base}_{counter}{ext}"
-                counter += 1
-            print(f"{Fore.YELLOW}        ⚠ File already exists. Saving as: {Fore.CYAN}{dest_path}")
-    
+            # Fallback: use library_path's parent as download_directory
+            conflicts_path = os.path.join(os.path.dirname(library_path), "!Conflicts")
+        if not os.path.exists(conflicts_path):
+            os.makedirs(conflicts_path)
+        conflict_dest_path = os.path.join(conflicts_path, file_name)
+        counter = 1
+        while os.path.exists(conflict_dest_path):
+            base, ext = os.path.splitext(file_name)
+            conflict_dest_path = os.path.join(conflicts_path, f"{base}_{counter}{ext}")
+            counter += 1
+        print(f"{Fore.YELLOW}        ⚠ File already exists. Moving to: {Fore.CYAN}{conflict_dest_path}")
+        dest_path = conflict_dest_path
+
     # Copy from root directory, move from subdirectories
     if is_root_file:
         shutil.copy2(source_file, dest_path)
@@ -2077,7 +2175,7 @@ def move_to_library(source_file, library_path, series_name, volume=None, chapter
     else:
         shutil.move(source_file, dest_path)
         logger.debug(f"Moved {source_file} to {dest_path}")
-    
+
     return dest_path
 
 def record_processing_history(source_path, dest_path, original_size, final_size, processed_at=None, run_id=None):
@@ -2525,7 +2623,10 @@ def confirm_processing(download_directory, library_path, work_directory, dry_run
     print(f"{Fore.WHITE}3. Organize them into {Fore.YELLOW}{library_path}")
     print(f"{Fore.WHITE}4. Use temporary work directory: {Fore.YELLOW}{work_directory}")
     print(f"{Fore.WHITE}5. Use processing mode: {Fore.YELLOW}{mode_desc}")
-    
+    if args.preserve_filename:
+        print(f"{Fore.WHITE}6. Preserve original filenames when moving to library")
+
+
     if dry_run:
         print(f"\n{Fore.YELLOW}⚠ DRY RUN MODE: No files will be modified")
     
@@ -2541,14 +2642,14 @@ def confirm_processing(download_directory, library_path, work_directory, dry_run
     print(f"{Fore.WHITE}• Processed folders will move to !Finished directory")
     
     while True:
-        proceed = input(f"\n{Fore.GREEN}➤ Continue with processing? (y/n): {Fore.WHITE}").strip().lower()
-        if proceed == 'y':
+        proceed = input(f"\n{Fore.GREEN}➤ Continue with processing? (Y/n): {Fore.WHITE}").strip().lower()
+        if proceed == '' or proceed == 'y':
             return True
         elif proceed == 'n':
             print(f"{Fore.YELLOW}Operation canceled by user.")
             return False
         else:
-            print(f"{Fore.RED}Please enter 'y' to continue or 'n' to cancel.")
+            print(f"{Fore.RED}Please enter 'Y' to continue or 'n' to cancel.")
 
 def get_potential_series_name(filename):
     """Extract series name using existing pattern matching infrastructure"""
@@ -3093,9 +3194,15 @@ def show_database_stats():
             ORDER BY use_count DESC 
             LIMIT 10
         """)
-
         top_patterns = cursor.fetchall()
-        
+
+        # Get lifetime total space saved
+        cursor.execute("""
+            SELECT SUM(space_saved) FROM processing_history WHERE space_saved IS NOT NULL
+        """)
+        lifetime_space_saved = cursor.fetchone()[0]
+        lifetime_space_saved_mb = (lifetime_space_saved or 0) / (1024 * 1024)
+
         print(f"\n{Fore.CYAN}{'='*60}")
         print(f"{Fore.CYAN}📊 PATTERN DATABASE STATISTICS")
         print(f"{Fore.CYAN}{'='*60}")
@@ -3104,6 +3211,7 @@ def show_database_stats():
         print(f"{Fore.WHITE}Total stored patterns: {Fore.GREEN}{total_count}")
         print(f"{Fore.WHITE}Manual patterns: {Fore.GREEN}{manual_count}")
         print(f"{Fore.WHITE}Auto-selected patterns: {Fore.GREEN}{auto_count}")
+        print(f"{Fore.WHITE}Lifetime space saved: {Fore.GREEN}{lifetime_space_saved_mb:.2f} MB")
         
         if top_patterns:
             print(f"\n{Fore.CYAN}Most Used Patterns:")
@@ -3148,6 +3256,8 @@ def parse_arguments():
                         help="Test database matches against files without processing them")
     parser.add_argument("--undo", action="store_true",
                         help="Undo a previous processing run by removing files from the library")
+    parser.add_argument("--preserve-filename", "-p", action="store_true",
+                        help="Keep original filename instead of renaming based on series/chapter/volume")
     return parser.parse_args()
 
 
@@ -3354,4 +3464,4 @@ if __name__ == '__main__':
             print(f"{Fore.YELLOW}Exiting without processing.")
             exit(0)
 
-    process_directory(download_directory, library_path, work_directory, dry_run=args.dry_run, auto_mode=args.auto, process_mode=args.mode, max_threads=args.threads)
+    process_directory(download_directory, library_path, work_directory, dry_run=args.dry_run, auto_mode=args.auto, process_mode=args.mode, max_threads=args.threads, preserve_filename=args.preserve_filename)
