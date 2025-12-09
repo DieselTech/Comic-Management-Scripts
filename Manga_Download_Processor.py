@@ -1814,7 +1814,9 @@ def convert_to_webp(source_filepath, temp_dir, max_threads=0):
         # Count files in original archive first
         original_file_count = 0
         with zipfile.ZipFile(source_filepath, 'r') as zip_ref:
-            original_file_count = len(zip_ref.namelist())
+            for name in zip_ref.namelist():
+                if not name.endswith('/'):
+                    original_file_count += 1
             zip_ref.extractall(temp_dir)
         
         # Get a list of all files in the temp directory
@@ -3465,3 +3467,4 @@ if __name__ == '__main__':
             exit(0)
 
     process_directory(download_directory, library_path, work_directory, dry_run=args.dry_run, auto_mode=args.auto, process_mode=args.mode, max_threads=args.threads, preserve_filename=args.preserve_filename)
+
