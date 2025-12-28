@@ -11,8 +11,8 @@ The --dry-run mode will still record the pattern matches in the database, but it
 Once you have the matching patterns set up, you can run the script with --auto to process files automatically.
 Otherwise, running in interactive mode will also allow you to refine the pattern matches as you go.
 
-Version: 0.9.8.0
-Updated: 10/09/2025
+Version: 0.9.8.1
+Updated: 12/09/2025
 
 Features:
 --------
@@ -3467,4 +3467,5 @@ if __name__ == '__main__':
             exit(0)
 
     process_directory(download_directory, library_path, work_directory, dry_run=args.dry_run, auto_mode=args.auto, process_mode=args.mode, max_threads=args.threads, preserve_filename=args.preserve_filename)
+
 
